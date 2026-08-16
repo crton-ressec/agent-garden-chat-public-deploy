@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { getApp, getApps, initializeApp } from "firebase/app";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
 import {
   ArrowUp,
   AtSign,
@@ -18,6 +20,7 @@ import {
   MoreHorizontal,
   Paperclip,
   PanelLeftClose,
+  Plus,
   PanelLeftOpen,
   Route,
   Search,
@@ -69,7 +72,7 @@ function PreviewText({ text }) {
 }
 
 function App() {
-  const [config, setConfig] = useState({ agents: [], googleClientId: "", configured: false });
+  const [config, setConfig] = useState({ agents: [], firebaseConfig: {}, configured: false });
   const [user, setUser] = useState(null);
   const [activeAgent, setActiveAgent] = useState("auto");
   const [provider, setProvider] = useState("gemini");
@@ -81,7 +84,7 @@ function App() {
   const [railOpen, setRailOpen] = useState(true);
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentLog, setAgentLog] = useState([]);
-  const googleButtonRef = useRef(null);
+  const [signingIn, setSigningIn] = useState(false);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const endRef = useRef(null);
@@ -117,57 +120,29 @@ function App() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
-  const onGoogleCredential = useCallback(async (response) => {
+  async function signInWithGoogle() {
+    setSigningIn(true);
+    setNotice("");
     try {
-      setNotice("");
-      const result = await fetch("/api/auth/google", {
+      if (!config.firebaseConfig?.apiKey) throw new Error("Firebase web configuration is not available on this server.");
+      const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
+      const auth = getAuth(firebaseApp);
+      const result = await signInWithPopup(auth, new GoogleAuthProvider());
+      const idToken = await result.user.getIdToken();
+      const sessionResponse = await fetch("/api/auth/firebase", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credential: response.credential }),
+        body: JSON.stringify({ idToken }),
       });
-      const data = await result.json();
-      if (!result.ok) throw new Error(data.error || "Google Sign-In could not be completed.");
+      const data = await sessionResponse.json();
+      if (!sessionResponse.ok) throw new Error(data.error || "Firebase Sign-In could not be completed.");
       setUser(data.user);
     } catch (error) {
-      setNotice(error.message);
+      setNotice(error.message || "Firebase Sign-In could not be completed.");
+    } finally {
+      setSigningIn(false);
     }
-  }, []);
-
-  useEffect(() => {
-    if (!config.googleClientId || user || !googleButtonRef.current) return;
-    const render = () => {
-      if (!window.google?.accounts?.id) return;
-      window.google.accounts.id.initialize({
-        client_id: config.googleClientId,
-        callback: onGoogleCredential,
-        auto_select: false,
-        cancel_on_tap_outside: true,
-      });
-      googleButtonRef.current.innerHTML = "";
-      window.google.accounts.id.renderButton(googleButtonRef.current, {
-        type: "standard",
-        theme: "outline",
-        size: "large",
-        text: "continue_with",
-        shape: "pill",
-        logo_alignment: "left",
-        width: 310,
-      });
-    };
-    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
-    if (existing) {
-      existing.addEventListener("load", render);
-      render();
-      return () => existing.removeEventListener("load", render);
-    }
-    const script = document.createElement("script");
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.defer = true;
-    script.onload = render;
-    document.head.appendChild(script);
-    return () => script.remove();
-  }, [config.googleClientId, onGoogleCredential, user]);
+  }
 
   function startNewChat() {
     setMessages([]);
@@ -180,9 +155,13 @@ function App() {
   }
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    setUser(null);
-    startNewChat();
+    try {
+      if (getApps().length) await firebaseSignOut(getAuth(getApp()));
+    } finally {
+      await fetch("/api/auth/logout", { method: "POST" });
+      setUser(null);
+      startNewChat();
+    }
   }
 
   async function handleFiles(event) {
@@ -388,7 +367,7 @@ function App() {
         <div className="activity-log"><div className="activity-title"><span>Activity</span><span className="live-status"><i />Live</span></div>{agentLog.length === 0 ? <div className="empty-activity">Your agent activity will appear here.</div> : agentLog.slice(-4).reverse().map((item) => <div className="activity-item" key={item.id}><span className={`activity-state ${item.status}`} /> <div>{item.label}<small>{item.time}</small></div></div>)}</div>
       </aside>
 
-      {!user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Private multi-agent workspace</span><h2>Sign in to start a conversation</h2><p>Your Google account only identifies your session. This app does not request access to Gmail, Drive, or any other Google data.</p>{config.googleClientId ? <div ref={googleButtonRef} className="google-button" /> : <div className="setup-warning"><strong>Google Sign-In needs configuration.</strong><span>Add <code>GOOGLE_CLIENT_ID</code> as a Render environment variable, then reload this page.</span></div>}{notice && <div className="notice error">{notice}</div>}<small>By continuing, you acknowledge this is an independently built workspace, not a Google product.</small></div></div>}
+      {!user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Firebase-powered workspace</span><h2>Sign up or sign in to continue</h2><p>Use your Google account to create or access your Agent Garden account. Firebase handles authentication; the app does not request Gmail, Drive, or other Google data.</p>{config.firebaseConfig?.apiKey ? <button className="firebase-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={18} /><span>{signingIn ? "Connecting…" : "Continue with Google"}</span></button> : <div className="setup-warning"><strong>Firebase Authentication needs configuration.</strong><span>Add the Firebase web configuration and Admin service-account variables in Render, then reload this page.</span></div>}{notice && <div className="notice error">{notice}</div>}<small>Authentication is provided by Firebase. Agent Garden is an independently built workspace.</small></div></div>}
       {notice && user && <div className="notice toast error"><button onClick={() => setNotice("")}><X size={14} /></button>{notice}</div>}
     </div>
   );

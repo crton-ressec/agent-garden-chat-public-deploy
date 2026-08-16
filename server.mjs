@@ -5,7 +5,8 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import jwt from "jsonwebtoken";
-import { OAuth2Client } from "google-auth-library";
+import { cert, getApps as getFirebaseAdminApps, initializeApp as initializeFirebaseAdminApp } from "firebase-admin/app";
+import { getAuth as getFirebaseAdminAuthInstance } from "firebase-admin/auth";
 import { GoogleGenAI } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -14,8 +15,8 @@ const app = express();
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
 
-const requiredEnv = ["GOOGLE_CLIENT_ID", "GEMINI_API_KEY", "SESSION_SECRET"];
-const authClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const requiredEnv = ["FIREBASE_ADMIN_PROJECT_ID", "FIREBASE_ADMIN_CLIENT_EMAIL", "FIREBASE_ADMIN_PRIVATE_KEY", "GEMINI_API_KEY", "SESSION_SECRET"];
+let firebaseAdminAuth = null;
 const gemini = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
@@ -145,6 +146,19 @@ function configured() {
   return requiredEnv.every((name) => Boolean(process.env[name]));
 }
 
+function getFirebaseAdminAuth() {
+  if (firebaseAdminAuth) return firebaseAdminAuth;
+  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  if (!projectId || !clientEmail || !privateKey) throw new Error("Firebase Admin authentication is not configured on the server.");
+  if (!getFirebaseAdminApps().length) {
+    initializeFirebaseAdminApp({ credential: cert({ projectId, clientEmail, privateKey }) });
+  }
+  firebaseAdminAuth = getFirebaseAdminAuthInstance();
+  return firebaseAdminAuth;
+}
+
 function userFromRequest(req) {
   const token = req.cookies.agent_garden_session;
   if (!token || !process.env.SESSION_SECRET) return null;
@@ -272,7 +286,14 @@ async function callPollinations({ agent, message, history, files }) {
 
 app.get("/api/config", (_req, res) => {
   res.json({
-    googleClientId: process.env.GOOGLE_CLIENT_ID || "",
+    firebaseConfig: {
+      apiKey: process.env.FIREBASE_API_KEY || "",
+      authDomain: process.env.FIREBASE_AUTH_DOMAIN || "",
+      projectId: process.env.FIREBASE_PROJECT_ID || "",
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET || "",
+      messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "",
+      appId: process.env.FIREBASE_APP_ID || "",
+    },
     configured: configured(),
     agents: [
       AUTO_AGENT,
@@ -287,24 +308,20 @@ app.get("/api/config", (_req, res) => {
   });
 });
 
-app.post("/api/auth/google", async (req, res) => {
-  if (!process.env.GOOGLE_CLIENT_ID || !process.env.SESSION_SECRET) {
-    return res.status(503).json({ error: "Google Sign-In is not configured on this server." });
+app.post("/api/auth/firebase", async (req, res) => {
+  if (!process.env.FIREBASE_ADMIN_PROJECT_ID || !process.env.FIREBASE_ADMIN_CLIENT_EMAIL || !process.env.FIREBASE_ADMIN_PRIVATE_KEY || !process.env.SESSION_SECRET) {
+    return res.status(503).json({ error: "Firebase Authentication is not configured on this server." });
   }
-  const credential = req.body?.credential;
-  if (!credential) return res.status(400).json({ error: "Missing Google credential." });
+  const idToken = req.body?.idToken;
+  if (!idToken) return res.status(400).json({ error: "Missing Firebase ID token." });
   try {
-    const ticket = await authClient.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
-    if (!payload?.sub || !payload.email_verified) throw new Error("Google account email could not be verified.");
+    const decoded = await getFirebaseAdminAuth().verifyIdToken(idToken);
+    if (!decoded?.uid || !decoded.email) throw new Error("Firebase account identity could not be verified.");
     const user = {
-      sub: payload.sub,
-      email: payload.email,
-      name: payload.name || payload.email.split("@")[0],
-      picture: payload.picture || "",
+      sub: decoded.uid,
+      email: decoded.email,
+      name: decoded.name || decoded.email.split("@")[0],
+      picture: decoded.picture || "",
     };
     const token = jwt.sign(user, process.env.SESSION_SECRET, { expiresIn: "7d" });
     res.cookie("agent_garden_session", token, {
@@ -316,7 +333,7 @@ app.post("/api/auth/google", async (req, res) => {
     });
     res.json({ user });
   } catch (error) {
-    res.status(401).json({ error: error.message || "Google Sign-In verification failed." });
+    res.status(401).json({ error: error.message || "Firebase Sign-In verification failed." });
   }
 });
 

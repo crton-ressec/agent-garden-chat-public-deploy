@@ -1,6 +1,6 @@
 # Agent Garden
 
-**Agent Garden** is a Render-ready, multi-agent chat workspace with an original, Gemini-inspired interface. It uses Google Sign-In to gate access, routes each task to one specialist automatically or manually, sends primary work to Gemini, and offers Pollinations as a text-only fallback.
+**Agent Garden** is a Render-ready, multi-agent chat workspace with an original, Gemini-inspired interface. It uses **Firebase Authentication with Google provider** for sign-up and sign-in, routes each task to one specialist automatically or manually, sends primary work to Gemini, and offers Pollinations as a text-only fallback.
 
 > This is an independently built interface. It does not use Google branding or assets, and it is not presented as a Google product.
 
@@ -9,7 +9,7 @@
 | Area | Included behavior |
 |---|---|
 | Interface | A dark three-panel workspace with conversation history, a chat canvas, an attachment composer, an agent desk, source cards, and responsive mobile behavior. |
-| Sign-in | Google Identity Services button, server-side ID-token verification, and an HTTP-only signed session cookie. |
+| Sign-up and sign-in | Firebase Authentication with Google provider, Firebase ID-token verification through the Admin SDK, and an HTTP-only signed application session cookie. |
 | Agents | Auto route, Coordinator, Researcher, File Analyst, Coder, Debugger, Planner, Writer, Critic, and Synthesizer. |
 | Routing | Auto route chooses one agent from the message content or attachment presence; it does not call all agents for every message. |
 | Gemini | Primary provider for chat, file-aware analysis, coding, and research. The tested default is `gemini-3.1-flash-lite`. |
@@ -26,6 +26,7 @@ Gemini’s free tier is quota-limited. Google Search grounding is available only
 |---|---|---:|---|
 | Gemini API | Main answers, files, coding, research | Yes | Free quotas and availability limits apply. |
 | Pollinations legacy text | Text-only fallback | No | Anonymous IP queue may be full; no attachments or dependable live research. |
+| Firebase Authentication | Google sign-up and sign-in | Firebase project required | Firebase Authentication and Google provider must be enabled in the Firebase Console. |
 
 ## Run locally
 
@@ -34,7 +35,7 @@ Use Node.js 22 or newer.
 ```bash
 npm install
 cp .env.example .env
-# Populate the three required values in .env, then:
+# Populate the Firebase, Gemini, and session values in .env, then:
 npm run build
 npm start
 ```
@@ -49,50 +50,67 @@ When using the Vite development server, run the API server separately on port `3
 
 ## Required environment variables
 
+### Gemini and application session
+
 | Variable | Purpose |
 |---|---|
 | `GEMINI_API_KEY` | Private server-side Gemini API key from Google AI Studio. |
-| `GOOGLE_CLIENT_ID` | Google Cloud OAuth 2.0 **Web application** client ID used by Sign in with Google. |
-| `SESSION_SECRET` | A long random secret used to sign the application session cookie. |
 | `GEMINI_MODEL` | Optional override; defaults to `gemini-3.1-flash-lite`. |
+| `SESSION_SECRET` | A long random secret used to sign the application session cookie. |
 | `NODE_ENV` | Set to `production` on Render. |
 
-Never add `.env` to Git or paste keys into chat messages. The included `.gitignore` excludes it.
+### Firebase web configuration
 
-## Configure Google Sign-In
+These values come from **Firebase Console → Project settings → Your apps → Web app configuration**. They are used by the browser Firebase SDK. They are not substitutes for the Admin credentials below.
 
-The app uses **Google Identity Services for authentication only**. It does not request Gmail, Drive, or other Google data scopes.
+| Variable | Firebase web configuration field |
+|---|---|
+| `FIREBASE_API_KEY` | `apiKey` |
+| `FIREBASE_AUTH_DOMAIN` | `authDomain` |
+| `FIREBASE_PROJECT_ID` | `projectId` |
+| `FIREBASE_STORAGE_BUCKET` | `storageBucket` |
+| `FIREBASE_MESSAGING_SENDER_ID` | `messagingSenderId` |
+| `FIREBASE_APP_ID` | `appId` |
 
-1. In [Google Cloud](https://console.cloud.google.com/), create or select a project.
-2. Configure the OAuth consent-screen branding for an external app, then create an OAuth client of type **Web application**.
-3. Copy its Client ID into `GOOGLE_CLIENT_ID`.
-4. Under **Authorized JavaScript origins**, add the exact origins you will use:
+### Firebase Admin server credentials
+
+These values are server-only. In Firebase Console, open **Project settings → Service accounts**, create a private key, and use the values from the downloaded service-account JSON:
+
+| Variable | JSON field |
+|---|---|
+| `FIREBASE_ADMIN_PROJECT_ID` | `project_id` |
+| `FIREBASE_ADMIN_CLIENT_EMAIL` | `client_email` |
+| `FIREBASE_ADMIN_PRIVATE_KEY` | `private_key`; preserve the escaped `\\n` line breaks when entering it in Render. |
+
+Never add `.env` or the downloaded service-account JSON to GitHub. The included `.gitignore` excludes `.env`.
+
+## Configure Firebase Google sign-up
+
+1. Open the [Firebase Console](https://console.firebase.google.com/) and create or select a Firebase project.
+2. Go to **Authentication → Sign-in method** and enable the **Google** provider.
+3. Go to **Project settings → Your apps**, add a **Web app**, and copy its Firebase configuration into the six `FIREBASE_*` web variables.
+4. Go to **Authentication → Settings → Authorized domains** and add your production host, for example:
 
    ```text
-   http://localhost:3000
-   https://YOUR-RENDER-SERVICE.onrender.com
+   agent-garden-chat.onrender.com
    ```
 
-5. Add the same Google client ID as a private Render environment variable. A client secret is **not** needed for this identity-only Sign in with Google flow.
+   Keep `localhost` authorized for local development.
 
-Google requires the production origin to match the origin registered for the client. Add the Render URL after the first deployment, then redeploy or refresh the site.
+5. Go to **Project settings → Service accounts → Generate new private key**. Copy `project_id`, `client_email`, and `private_key` into the three `FIREBASE_ADMIN_*` Render variables.
+6. Add your Gemini key and a random `SESSION_SECRET`.
+
+No separate Google OAuth client ID or Google client secret is needed for this Firebase-based flow. Firebase manages the Google provider configuration, while the Node.js backend verifies Firebase ID tokens with the Admin SDK.
 
 ## Deploy to Render
 
 The repository includes `render.yaml` for a free Node.js web service.
 
-1. Put this project in a private GitHub repository. Do not commit `.env`.
+1. Put this project in a private GitHub repository. Do not commit `.env` or the Firebase service-account JSON.
 2. In Render, select **New → Blueprint** and connect the repository. Render reads `render.yaml`.
-3. Confirm the Free web-service plan and add the prompted private variables:
-
-   ```text
-   GEMINI_API_KEY=your Google AI Studio key
-   GOOGLE_CLIENT_ID=your Google OAuth Web client ID
-   SESSION_SECRET=a long random secret
-   ```
-
+3. Confirm the Free web-service plan and add all prompted private variables: the Gemini key, the six Firebase web values, the three Firebase Admin values, and `SESSION_SECRET`.
 4. Deploy. Render builds with `npm ci && npm run build` and starts the service with `npm start`.
-5. Copy the final `https://...onrender.com` URL into Google Cloud’s **Authorized JavaScript origins**, then return to the app and test Sign in with Google.
+5. Add the final Render hostname to Firebase Authentication’s **Authorized domains**, then open the deployed app and click **Continue with Google**.
 
 Render free web services are appropriate for demos and personal projects but can have usage limits and cold-start behavior. Keep the app’s rate limit in place and do not promise unlimited use.
 
@@ -105,21 +123,29 @@ docker build -t agent-garden .
 docker run --rm -p 3000:3000 \
   -e NODE_ENV=production \
   -e GEMINI_API_KEY \
-  -e GOOGLE_CLIENT_ID \
+  -e GEMINI_MODEL \
+  -e FIREBASE_API_KEY \
+  -e FIREBASE_AUTH_DOMAIN \
+  -e FIREBASE_PROJECT_ID \
+  -e FIREBASE_STORAGE_BUCKET \
+  -e FIREBASE_MESSAGING_SENDER_ID \
+  -e FIREBASE_APP_ID \
+  -e FIREBASE_ADMIN_PROJECT_ID \
+  -e FIREBASE_ADMIN_CLIENT_EMAIL \
+  -e FIREBASE_ADMIN_PRIVATE_KEY \
   -e SESSION_SECRET \
   agent-garden
 ```
 
 ## Checks completed
 
-The project has been built successfully with Vite and audited with `npm audit --omit=dev`, which reported no production dependency vulnerabilities at the time of completion. A direct Gemini `gemini-3.1-flash-lite` smoke test completed successfully. An authenticated end-to-end request using **Auto route** correctly selected the **Coder** agent and returned a Gemini response with routing metadata. The local interface was visually reviewed, including its Google Sign-In gate, agent desk, attachment controls, provider selector, and responsive layout.
-
-The anonymous Pollinations endpoint returned its expected queue-full response during validation; the application translates this into a clear retry-or-switch-to-Gemini message. The final Google Sign-In flow requires your actual OAuth client ID and matching approved origin, so that one live sign-in step must be completed after deployment.
+The Firebase-authenticated project builds successfully with Vite, passes `node --check server.mjs`, and has no production dependency vulnerabilities after the UUID compatibility override. The local service health and Firebase web configuration endpoints were verified with placeholder values. The live sign-up flow must be completed after you add the real Firebase web configuration and Admin service-account values in Render.
 
 ## References
 
-- [Google Sign in with Google for Web](https://developers.google.com/identity/gsi/web/guides/overview)
-- [Google OAuth 2.0 for web-server applications](https://developers.google.com/identity/protocols/oauth2/web-server)
+- [Firebase: Authenticate Using Google with JavaScript](https://firebase.google.com/docs/auth/web/google-signin)
+- [Firebase: Verify ID Tokens](https://firebase.google.com/docs/auth/admin/verify-id-tokens)
 - [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing)
 - [Render free instances](https://render.com/docs/free)
+- [Render Blueprint specification](https://render.com/docs/blueprint-spec)
 - [Pollinations API documentation](https://gen.pollinations.ai/docs)
