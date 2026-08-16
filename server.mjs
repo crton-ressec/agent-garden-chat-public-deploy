@@ -328,14 +328,6 @@ app.use(["/__/auth", "/__/firebase"], async (req, res) => {
     upstream.headers.forEach((value, key) => {
       if (!['content-length', 'transfer-encoding', 'connection'].includes(key.toLowerCase())) res.setHeader(key, value);
     });
-    // Firebase's helper uses cross-window/iframe messaging; Helmet's default isolation headers break it.
-    res.removeHeader('Cross-Origin-Opener-Policy');
-    res.removeHeader('Cross-Origin-Resource-Policy');
-    res.removeHeader('Content-Security-Policy');
-    res.removeHeader('X-Frame-Options');
-    res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    res.setHeader('Referrer-Policy', 'no-referrer-when-downgrade');
     res.send(Buffer.from(await upstream.arrayBuffer()));
   } catch (error) {
     res.status(502).send(`Firebase auth helper proxy failed: ${error.message}`);
