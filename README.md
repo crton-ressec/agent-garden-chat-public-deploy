@@ -9,7 +9,7 @@
 | Area | Included behavior |
 |---|---|
 | Interface | A dark three-panel workspace with conversation history, a chat canvas, an attachment composer, an agent desk, source cards, and responsive mobile behavior. |
-| Sign-up and sign-in | Firebase Authentication with Google provider, server-side Firebase ID-token verification using public signing certificates, and an HTTP-only signed application session cookie. |
+| Sign-up and sign-in | Firebase Authentication with Google provider, redirect-based sign-in, server-side Firebase ID-token verification using public signing certificates, and an HTTP-only signed application session cookie. |
 | Agents | Auto route, Coordinator, Researcher, File Analyst, Coder, Debugger, Planner, Writer, Critic, and Synthesizer. |
 | Routing | Auto route chooses one agent from the message content or attachment presence; it does not call all agents for every message. |
 | Gemini | Primary provider for chat, file-aware analysis, coding, and research. The tested default is `gemini-3.1-flash-lite`. |
@@ -99,7 +99,7 @@ The repository includes `render.yaml` for a free Node.js web service.
 2. In Render, select **New → Blueprint** and connect the repository. Render reads `render.yaml`.
 3. Confirm the Free web-service plan and add the Gemini key, the six Firebase web values, and `SESSION_SECRET`.
 4. Deploy. Render builds with `npm ci --include=dev && npm run build` and starts the service with `npm start`.
-5. Add the final Render hostname to Firebase Authentication’s **Authorized domains**, then open the deployed app and click **Continue with Google**.
+5. Add the final Render hostname to Firebase Authentication’s **Authorized domains**, then open the deployed app and click **Continue with Google**. The app redirects to Google for authentication and returns to Agent Garden to finish the session exchange.
 
 Render free web services are appropriate for demos and personal projects but can have usage limits and cold-start behavior. Keep the app’s rate limit in place and do not promise unlimited use.
 

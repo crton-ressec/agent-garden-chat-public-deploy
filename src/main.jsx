@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
+import { getAuth, getRedirectResult, GoogleAuthProvider, signInWithRedirect, signOut as firebaseSignOut } from "firebase/auth";
 import {
   ArrowUp,
   AtSign,
@@ -116,6 +116,31 @@ function App() {
   }, [fetchConfig]);
 
   useEffect(() => {
+    if (!config.firebaseConfig?.apiKey) return undefined;
+    let activeEffect = true;
+    (async () => {
+      try {
+        const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
+        const auth = getAuth(firebaseApp);
+        const result = await getRedirectResult(auth);
+        if (!result?.user || !activeEffect) return;
+        const idToken = await result.user.getIdToken();
+        const sessionResponse = await fetch("/api/auth/firebase", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken }),
+        });
+        const data = await sessionResponse.json();
+        if (!sessionResponse.ok) throw new Error(data.error || "Firebase Sign-In could not be completed.");
+        setUser(data.user);
+      } catch (error) {
+        if (activeEffect) setNotice(error.message || "Firebase Sign-In could not be completed.");
+      }
+    })();
+    return () => { activeEffect = false; };
+  }, [config.firebaseConfig?.apiKey]);
+
+  useEffect(() => {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
@@ -127,16 +152,7 @@ function App() {
       if (!config.firebaseConfig?.apiKey) throw new Error("Firebase web configuration is not available on this server.");
       const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
       const auth = getAuth(firebaseApp);
-      const result = await signInWithPopup(auth, new GoogleAuthProvider());
-      const idToken = await result.user.getIdToken();
-      const sessionResponse = await fetch("/api/auth/firebase", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken }),
-      });
-      const data = await sessionResponse.json();
-      if (!sessionResponse.ok) throw new Error(data.error || "Firebase Sign-In could not be completed.");
-      setUser(data.user);
+      await signInWithRedirect(auth, new GoogleAuthProvider());
     } catch (error) {
       setNotice(error.message || "Firebase Sign-In could not be completed.");
     } finally {
