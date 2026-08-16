@@ -127,6 +127,10 @@ docker run --rm -p 3000:3000 \
 
 The Firebase-authenticated project builds successfully with Vite, passes `node --check server.mjs`, and has no production dependency vulnerabilities after the UUID compatibility override. The local service health and Firebase web configuration endpoints were verified with placeholder values. The live sign-up flow must be completed after you add the real Firebase web configuration values and session secret in Render.
 
+## Temporary authentication test mode
+
+For temporary chat testing only, set the Render environment variable `AUTH_REQUIRED=false`. This exposes the app without Google authentication and uses a clearly labeled temporary test user. Restore `AUTH_REQUIRED=true` before any real deployment or personal data storage.
+
 ## References
 
 - [Firebase: Authenticate Using Google with JavaScript](https://firebase.google.com/docs/auth/web/google-signin)
