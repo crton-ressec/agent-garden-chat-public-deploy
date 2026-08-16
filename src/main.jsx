@@ -18,6 +18,7 @@ import {
   Menu,
   MessageSquarePlus,
   MoreHorizontal,
+  Copy,
   Paperclip,
   PanelLeftClose,
   Plus,
@@ -85,6 +86,8 @@ function App() {
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentLog, setAgentLog] = useState([]);
   const [signingIn, setSigningIn] = useState(false);
+  const [authDiagnostics, setAuthDiagnostics] = useState(null);
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const endRef = useRef(null);
@@ -126,29 +129,46 @@ function App() {
       setNotice(error.message || "Firebase could not be initialized.");
       return undefined;
     }
-    const exchangeFirebaseUser = async (firebaseUser) => {
+    const safeError = (error) => ({
+      name: error?.name || "Error",
+      code: error?.code || null,
+      message: error?.message || String(error),
+    });
+    const updateDiagnostics = (patch) => {
+      if (activeEffect) setAuthDiagnostics((current) => ({ ...(current || {}), ...patch, capturedAt: new Date().toISOString() }));
+    };
+    const exchangeFirebaseUser = async (firebaseUser, source = "auth-state") => {
       if (!firebaseUser || !activeEffect) return;
+      updateDiagnostics({ stage: "firebase-user-received", userSource: source, firebaseUser: { uidPresent: Boolean(firebaseUser.uid), emailPresent: Boolean(firebaseUser.email), providerIds: firebaseUser.providerData?.map((item) => item.providerId) || [] } });
       try {
         const idToken = await firebaseUser.getIdToken();
-        const sessionResponse = await fetch("/api/auth/firebase", {
+        updateDiagnostics({ stage: "sending-token-to-server", tokenCreated: true });
+        const sessionResponse = await fetch(`/api/auth/firebase?client=${Date.now()}`, {
           method: "POST",
+          cache: "no-store",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ idToken }),
         });
-        const data = await sessionResponse.json();
+        const data = await sessionResponse.json().catch(() => ({}));
+        updateDiagnostics({ stage: sessionResponse.ok ? "server-session-created" : "server-session-rejected", exchange: { httpStatus: sessionResponse.status, ok: sessionResponse.ok, response: data.user ? { userReturned: true, uidPresent: Boolean(data.user.uid), emailPresent: Boolean(data.user.email) } : { error: data.error || null } } });
         if (!sessionResponse.ok) throw new Error(data.error || "Firebase Sign-In could not be completed.");
         if (activeEffect) setUser(data.user);
       } catch (error) {
+        updateDiagnostics({ stage: "authentication-error", error: safeError(error) });
         if (activeEffect) setNotice(error.message || "Firebase Sign-In could not be completed.");
       }
     };
     (async () => {
       try {
+        updateDiagnostics({ stage: "waiting-for-firebase", configLoaded: true, persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, redirectPendingMarker: sessionStorage.getItem("agent_garden_redirect_pending") === "1" });
         await auth.authStateReady();
         const redirectResult = await getRedirectResult(auth);
-        if (redirectResult?.user) await exchangeFirebaseUser(redirectResult.user);
-        else if (auth.currentUser) await exchangeFirebaseUser(auth.currentUser);
+        updateDiagnostics({ stage: redirectResult?.user || auth.currentUser ? "redirect-result-found" : "redirect-result-empty", redirectResult: { userReturned: Boolean(redirectResult?.user), credentialPresent: Boolean(redirectResult?.credential), operationType: redirectResult?.operationType || null }, currentUserPresent: Boolean(auth.currentUser) });
+        sessionStorage.removeItem("agent_garden_redirect_pending");
+        if (redirectResult?.user) await exchangeFirebaseUser(redirectResult.user, "redirect-result");
+        else if (auth.currentUser) await exchangeFirebaseUser(auth.currentUser, "current-user");
       } catch (error) {
+        updateDiagnostics({ stage: "redirect-processing-error", error: safeError(error) });
         if (activeEffect) setNotice(error.message || "Firebase redirect sign-in could not be completed.");
       }
     })();
@@ -169,12 +189,25 @@ function App() {
       const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
       const auth = getAuth(firebaseApp);
       await setPersistence(auth, browserLocalPersistence);
+      setAuthDiagnostics({ stage: "redirect-started", persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, capturedAt: new Date().toISOString() });
       sessionStorage.setItem("agent_garden_redirect_pending", "1");
       await signInWithRedirect(auth, new GoogleAuthProvider());
     } catch (error) {
       setNotice(error.message || "Firebase Sign-In could not be completed.");
     } finally {
       setSigningIn(false);
+    }
+  }
+
+  async function copyDiagnostics() {
+    if (!authDiagnostics) return;
+    const report = JSON.stringify(authDiagnostics, null, 2);
+    try {
+      await navigator.clipboard.writeText(report);
+      setDiagnosticsCopied(true);
+      window.setTimeout(() => setDiagnosticsCopied(false), 1800);
+    } catch {
+      setNotice("Your browser blocked clipboard access. Select and copy the diagnostic text manually.");
     }
   }
 
@@ -401,7 +434,7 @@ function App() {
         <div className="activity-log"><div className="activity-title"><span>Activity</span><span className="live-status"><i />Live</span></div>{agentLog.length === 0 ? <div className="empty-activity">Your agent activity will appear here.</div> : agentLog.slice(-4).reverse().map((item) => <div className="activity-item" key={item.id}><span className={`activity-state ${item.status}`} /> <div>{item.label}<small>{item.time}</small></div></div>)}</div>
       </aside>
 
-      {!user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Firebase-powered workspace</span><h2>Sign up or sign in to continue</h2><p>Use your Google account to create or access your Agent Garden account. Firebase handles authentication; the app does not request Gmail, Drive, or other Google data.</p>{config.firebaseConfig?.apiKey ? <button className="firebase-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={18} /><span>{signingIn ? "Connecting…" : "Continue with Google"}</span></button> : <div className="setup-warning"><strong>Firebase Authentication needs configuration.</strong><span>Add the Firebase web configuration and Admin service-account variables in Render, then reload this page.</span></div>}{notice && <div className="notice error">{notice}</div>}<small>Authentication is provided by Firebase. Agent Garden is an independently built workspace.</small></div></div>}
+      {!user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Firebase-powered workspace</span><h2>Sign up or sign in to continue</h2><p>Use your Google account to create or access your Agent Garden account. Firebase handles authentication; the app does not request Gmail, Drive, or other Google data.</p>{config.firebaseConfig?.apiKey ? <button className="firebase-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={18} /><span>{signingIn ? "Connecting…" : "Continue with Google"}</span></button> : <div className="setup-warning"><strong>Firebase Authentication needs configuration.</strong><span>Add the Firebase web configuration and Admin service-account variables in Render, then reload this page.</span></div>}{notice && <div className="notice error">{notice}</div>}{authDiagnostics && <div className="auth-diagnostics"><div className="diagnostics-heading"><strong>Sign-in diagnostics</strong><button className="diagnostics-copy" onClick={copyDiagnostics}>{diagnosticsCopied ? <Check size={14} /> : <Copy size={14} />}{diagnosticsCopied ? "Copied" : "Copy report"}</button></div><p>Safe to paste here: tokens, cookies, and secret values are not included.</p><pre>{JSON.stringify(authDiagnostics, null, 2)}</pre></div>}<small>Authentication is provided by Firebase. Agent Garden is an independently built workspace.</small></div></div>}
       {notice && user && <div className="notice toast error"><button onClick={() => setNotice("")}><X size={14} /></button>{notice}</div>}
     </div>
   );
