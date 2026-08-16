@@ -95,7 +95,7 @@ function App() {
   );
 
   const fetchConfig = useCallback(async () => {
-    const response = await fetch("/api/config");
+    const response = await fetch(`/api/config?client=${Date.now()}`, { cache: "no-store" });
     const data = await response.json();
     setConfig(data);
     if (data.agents?.length && !data.agents.some((agent) => agent.id === activeAgent)) setActiveAgent(data.agents[0].id);
@@ -103,7 +103,7 @@ function App() {
 
   useEffect(() => {
     fetchConfig().catch(() => setNotice("Unable to load the application configuration."));
-    fetch("/api/auth/me")
+    fetch(`/api/auth/me?client=${Date.now()}`, { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => setUser(data.user || null))
       .catch(() => undefined);
