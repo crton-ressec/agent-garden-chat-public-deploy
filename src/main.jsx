@@ -135,7 +135,9 @@ function App() {
       message: error?.message || String(error),
     });
     const updateDiagnostics = (patch) => {
-      if (activeEffect) setAuthDiagnostics((current) => ({ ...(current || {}), ...patch, capturedAt: new Date().toISOString() }));
+      if (!activeEffect) return;
+      const event = { ...patch, capturedAt: new Date().toISOString() };
+      setAuthDiagnostics((current) => ({ latest: event, events: [...(current?.events || []), event].slice(-40) }));
     };
     const inspectClientState = async () => {
       let localStorageKeys = [];
@@ -198,7 +200,8 @@ function App() {
       const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
       const auth = getAuth(firebaseApp);
       await setPersistence(auth, browserLocalPersistence);
-      setAuthDiagnostics({ stage: "redirect-started", persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, capturedAt: new Date().toISOString() });
+      const event = { stage: "redirect-started", persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, capturedAt: new Date().toISOString() };
+      setAuthDiagnostics({ latest: event, events: [event] });
       sessionStorage.setItem("agent_garden_redirect_pending", "1");
       await signInWithRedirect(auth, new GoogleAuthProvider());
     } catch (error) {
@@ -216,9 +219,11 @@ function App() {
       sessionStorage.removeItem("agent_garden_redirect_pending");
       setUser(null);
       setNotice("");
-      setAuthDiagnostics({ stage: "local-auth-state-reset", resetLocalStorage: true, resetSessionMarker: true, capturedAt: new Date().toISOString() });
+      const event = { stage: "local-auth-state-reset", resetLocalStorage: true, resetSessionMarker: true, capturedAt: new Date().toISOString() };
+      setAuthDiagnostics({ latest: event, events: [event] });
     } catch (error) {
-      setAuthDiagnostics({ stage: "auth-state-reset-error", error: { name: error?.name || "Error", code: error?.code || null, message: error?.message || String(error) }, capturedAt: new Date().toISOString() });
+      const event = { stage: "auth-state-reset-error", error: { name: error?.name || "Error", code: error?.code || null, message: error?.message || String(error) }, capturedAt: new Date().toISOString() };
+      setAuthDiagnostics({ latest: event, events: [event] });
       setNotice(error.message || "Could not reset local Google sign-in state.");
     }
   }
