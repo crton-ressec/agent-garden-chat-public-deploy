@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithRedirect, signOut as firebaseSignOut } from "firebase/auth";
+import { browserLocalPersistence, getAuth, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, setPersistence, signInWithRedirect, signOut as firebaseSignOut } from "firebase/auth";
 import {
   ArrowUp,
   AtSign,
@@ -118,9 +118,15 @@ function App() {
   useEffect(() => {
     if (!config.firebaseConfig?.apiKey) return undefined;
     let activeEffect = true;
-    const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
-    const auth = getAuth(firebaseApp);
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    let auth;
+    try {
+      const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
+      auth = getAuth(firebaseApp);
+    } catch (error) {
+      setNotice(error.message || "Firebase could not be initialized.");
+      return undefined;
+    }
+    const exchangeFirebaseUser = async (firebaseUser) => {
       if (!firebaseUser || !activeEffect) return;
       try {
         const idToken = await firebaseUser.getIdToken();
@@ -135,7 +141,18 @@ function App() {
       } catch (error) {
         if (activeEffect) setNotice(error.message || "Firebase Sign-In could not be completed.");
       }
-    });
+    };
+    (async () => {
+      try {
+        await auth.authStateReady();
+        const redirectResult = await getRedirectResult(auth);
+        if (redirectResult?.user) await exchangeFirebaseUser(redirectResult.user);
+        else if (auth.currentUser) await exchangeFirebaseUser(auth.currentUser);
+      } catch (error) {
+        if (activeEffect) setNotice(error.message || "Firebase redirect sign-in could not be completed.");
+      }
+    })();
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => { exchangeFirebaseUser(firebaseUser); });
     return () => { activeEffect = false; unsubscribe(); };
   }, [config.firebaseConfig?.apiKey]);
 
@@ -151,6 +168,8 @@ function App() {
       if (!config.firebaseConfig?.apiKey) throw new Error("Firebase web configuration is not available on this server.");
       const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
       const auth = getAuth(firebaseApp);
+      await setPersistence(auth, browserLocalPersistence);
+      sessionStorage.setItem("agent_garden_redirect_pending", "1");
       await signInWithRedirect(auth, new GoogleAuthProvider());
     } catch (error) {
       setNotice(error.message || "Firebase Sign-In could not be completed.");
