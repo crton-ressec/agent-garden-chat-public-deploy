@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { getAuth, getRedirectResult, GoogleAuthProvider, signInWithRedirect, signOut as firebaseSignOut } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithRedirect, signOut as firebaseSignOut } from "firebase/auth";
 import {
   ArrowUp,
   AtSign,
@@ -118,13 +118,12 @@ function App() {
   useEffect(() => {
     if (!config.firebaseConfig?.apiKey) return undefined;
     let activeEffect = true;
-    (async () => {
+    const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
+    const auth = getAuth(firebaseApp);
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (!firebaseUser || !activeEffect) return;
       try {
-        const firebaseApp = getApps().length ? getApp() : initializeApp(config.firebaseConfig);
-        const auth = getAuth(firebaseApp);
-        const result = await getRedirectResult(auth);
-        if (!result?.user || !activeEffect) return;
-        const idToken = await result.user.getIdToken();
+        const idToken = await firebaseUser.getIdToken();
         const sessionResponse = await fetch("/api/auth/firebase", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -132,12 +131,12 @@ function App() {
         });
         const data = await sessionResponse.json();
         if (!sessionResponse.ok) throw new Error(data.error || "Firebase Sign-In could not be completed.");
-        setUser(data.user);
+        if (activeEffect) setUser(data.user);
       } catch (error) {
         if (activeEffect) setNotice(error.message || "Firebase Sign-In could not be completed.");
       }
-    })();
-    return () => { activeEffect = false; };
+    });
+    return () => { activeEffect = false; unsubscribe(); };
   }, [config.firebaseConfig?.apiKey]);
 
   useEffect(() => {
