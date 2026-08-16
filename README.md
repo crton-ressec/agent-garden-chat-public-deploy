@@ -1,6 +1,6 @@
 # Agent Garden
 
-**Agent Garden** is a Render-ready, multi-agent chat workspace with an original, Gemini-inspired interface. It uses **Firebase Authentication with Google provider** for sign-up and sign-in, routes each task to one specialist automatically or manually, sends primary work to Gemini, and offers Pollinations as a text-only fallback.
+**Agent Garden** is a Render-ready, multi-agent chat workspace with an original, Gemini-inspired interface. It uses **Firebase Authentication with Google provider** for sign-up and sign-in, verifies Firebase ID tokens against Firebase’s public signing certificates, routes each task to one specialist automatically or manually, sends primary work to Gemini, and offers Pollinations as a text-only fallback.
 
 > This is an independently built interface. It does not use Google branding or assets, and it is not presented as a Google product.
 
@@ -9,7 +9,7 @@
 | Area | Included behavior |
 |---|---|
 | Interface | A dark three-panel workspace with conversation history, a chat canvas, an attachment composer, an agent desk, source cards, and responsive mobile behavior. |
-| Sign-up and sign-in | Firebase Authentication with Google provider, Firebase ID-token verification through the Admin SDK, and an HTTP-only signed application session cookie. |
+| Sign-up and sign-in | Firebase Authentication with Google provider, server-side Firebase ID-token verification using public signing certificates, and an HTTP-only signed application session cookie. |
 | Agents | Auto route, Coordinator, Researcher, File Analyst, Coder, Debugger, Planner, Writer, Critic, and Synthesizer. |
 | Routing | Auto route chooses one agent from the message content or attachment presence; it does not call all agents for every message. |
 | Gemini | Primary provider for chat, file-aware analysis, coding, and research. The tested default is `gemini-3.1-flash-lite`. |
@@ -61,7 +61,7 @@ When using the Vite development server, run the API server separately on port `3
 
 ### Firebase web configuration
 
-These values come from **Firebase Console → Project settings → Your apps → Web app configuration**. They are used by the browser Firebase SDK. They are not substitutes for the Admin credentials below.
+These values come from **Firebase Console → Project settings → Your apps → Web app configuration**. They are used by the browser Firebase SDK. The server also uses `FIREBASE_PROJECT_ID` to validate Firebase token issuer and audience claims.
 
 | Variable | Firebase web configuration field |
 |---|---|
@@ -72,17 +72,7 @@ These values come from **Firebase Console → Project settings → Your apps →
 | `FIREBASE_MESSAGING_SENDER_ID` | `messagingSenderId` |
 | `FIREBASE_APP_ID` | `appId` |
 
-### Firebase Admin server credentials
-
-These values are server-only. In Firebase Console, open **Project settings → Service accounts**, create a private key, and use the values from the downloaded service-account JSON:
-
-| Variable | JSON field |
-|---|---|
-| `FIREBASE_ADMIN_PROJECT_ID` | `project_id` |
-| `FIREBASE_ADMIN_CLIENT_EMAIL` | `client_email` |
-| `FIREBASE_ADMIN_PRIVATE_KEY` | `private_key`; preserve the escaped `\\n` line breaks when entering it in Render. |
-
-Never add `.env` or the downloaded service-account JSON to GitHub. The included `.gitignore` excludes `.env`.
+Never add `.env` or private credentials to GitHub. The included `.gitignore` excludes `.env`.
 
 ## Configure Firebase Google sign-up
 
@@ -97,19 +87,18 @@ Never add `.env` or the downloaded service-account JSON to GitHub. The included 
 
    Keep `localhost` authorized for local development.
 
-5. Go to **Project settings → Service accounts → Generate new private key**. Copy `project_id`, `client_email`, and `private_key` into the three `FIREBASE_ADMIN_*` Render variables.
-6. Add your Gemini key and a random `SESSION_SECRET`.
+5. Add your Gemini key and a random `SESSION_SECRET`.
 
-No separate Google OAuth client ID or Google client secret is needed for this Firebase-based flow. Firebase manages the Google provider configuration, while the Node.js backend verifies Firebase ID tokens with the Admin SDK.
+No separate Google OAuth client ID, Google client secret, or Firebase service-account JSON is needed for this flow. Firebase manages the Google provider configuration, while the Node.js backend verifies Firebase ID tokens with Firebase’s rotating public signing certificates.
 
 ## Deploy to Render
 
 The repository includes `render.yaml` for a free Node.js web service.
 
-1. Put this project in a private GitHub repository. Do not commit `.env` or the Firebase service-account JSON.
+1. Put this project in a private GitHub repository. Do not commit `.env` or private credentials.
 2. In Render, select **New → Blueprint** and connect the repository. Render reads `render.yaml`.
-3. Confirm the Free web-service plan and add all prompted private variables: the Gemini key, the six Firebase web values, the three Firebase Admin values, and `SESSION_SECRET`.
-4. Deploy. Render builds with `npm ci && npm run build` and starts the service with `npm start`.
+3. Confirm the Free web-service plan and add the Gemini key, the six Firebase web values, and `SESSION_SECRET`.
+4. Deploy. Render builds with `npm ci --include=dev && npm run build` and starts the service with `npm start`.
 5. Add the final Render hostname to Firebase Authentication’s **Authorized domains**, then open the deployed app and click **Continue with Google**.
 
 Render free web services are appropriate for demos and personal projects but can have usage limits and cold-start behavior. Keep the app’s rate limit in place and do not promise unlimited use.
@@ -130,16 +119,13 @@ docker run --rm -p 3000:3000 \
   -e FIREBASE_STORAGE_BUCKET \
   -e FIREBASE_MESSAGING_SENDER_ID \
   -e FIREBASE_APP_ID \
-  -e FIREBASE_ADMIN_PROJECT_ID \
-  -e FIREBASE_ADMIN_CLIENT_EMAIL \
-  -e FIREBASE_ADMIN_PRIVATE_KEY \
   -e SESSION_SECRET \
   agent-garden
 ```
 
 ## Checks completed
 
-The Firebase-authenticated project builds successfully with Vite, passes `node --check server.mjs`, and has no production dependency vulnerabilities after the UUID compatibility override. The local service health and Firebase web configuration endpoints were verified with placeholder values. The live sign-up flow must be completed after you add the real Firebase web configuration and Admin service-account values in Render.
+The Firebase-authenticated project builds successfully with Vite, passes `node --check server.mjs`, and has no production dependency vulnerabilities after the UUID compatibility override. The local service health and Firebase web configuration endpoints were verified with placeholder values. The live sign-up flow must be completed after you add the real Firebase web configuration values and session secret in Render.
 
 ## References
 

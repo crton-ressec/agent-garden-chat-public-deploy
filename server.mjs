@@ -5,8 +5,6 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import jwt from "jsonwebtoken";
-import { cert, getApps as getFirebaseAdminApps, initializeApp as initializeFirebaseAdminApp } from "firebase-admin/app";
-import { getAuth as getFirebaseAdminAuthInstance } from "firebase-admin/auth";
 import { GoogleGenAI } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,8 +13,17 @@ const app = express();
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
 
-const requiredEnv = ["FIREBASE_ADMIN_PROJECT_ID", "FIREBASE_ADMIN_CLIENT_EMAIL", "FIREBASE_ADMIN_PRIVATE_KEY", "GEMINI_API_KEY", "SESSION_SECRET"];
-let firebaseAdminAuth = null;
+const requiredEnv = [
+  "FIREBASE_API_KEY",
+  "FIREBASE_AUTH_DOMAIN",
+  "FIREBASE_PROJECT_ID",
+  "FIREBASE_STORAGE_BUCKET",
+  "FIREBASE_MESSAGING_SENDER_ID",
+  "FIREBASE_APP_ID",
+  "GEMINI_API_KEY",
+  "SESSION_SECRET",
+];
+let firebaseCertCache = { expiresAt: 0, certs: {} };
 const gemini = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
@@ -146,17 +153,34 @@ function configured() {
   return requiredEnv.every((name) => Boolean(process.env[name]));
 }
 
-function getFirebaseAdminAuth() {
-  if (firebaseAdminAuth) return firebaseAdminAuth;
-  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
-  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n");
-  if (!projectId || !clientEmail || !privateKey) throw new Error("Firebase Admin authentication is not configured on the server.");
-  if (!getFirebaseAdminApps().length) {
-    initializeFirebaseAdminApp({ credential: cert({ projectId, clientEmail, privateKey }) });
+async function getFirebaseCertificates(forceRefresh = false) {
+  if (!forceRefresh && firebaseCertCache.expiresAt > Date.now() && Object.keys(firebaseCertCache.certs).length) {
+    return firebaseCertCache.certs;
   }
-  firebaseAdminAuth = getFirebaseAdminAuthInstance();
-  return firebaseAdminAuth;
+  const response = await fetch("https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com");
+  if (!response.ok) throw new Error("Firebase public signing certificates are unavailable.");
+  const certs = await response.json();
+  const cacheControl = response.headers.get("cache-control") || "";
+  const maxAge = Number(cacheControl.match(/max-age=(\\d+)/)?.[1] || 3600);
+  firebaseCertCache = { certs, expiresAt: Date.now() + Math.max(300, maxAge - 60) * 1000 };
+  return certs;
+}
+
+async function verifyFirebaseIdToken(idToken) {
+  const header = jwt.decode(idToken, { complete: true })?.header;
+  if (!header?.kid || header.alg !== "RS256") throw new Error("Invalid Firebase ID token header.");
+  let certs = await getFirebaseCertificates();
+  let certificate = certs[header.kid];
+  if (!certificate) {
+    certs = await getFirebaseCertificates(true);
+    certificate = certs[header.kid];
+  }
+  if (!certificate) throw new Error("Firebase ID token signing key is not recognized.");
+  return jwt.verify(idToken, certificate, {
+    algorithms: ["RS256"],
+    issuer: `https://securetoken.google.com/${process.env.FIREBASE_PROJECT_ID}`,
+    audience: process.env.FIREBASE_PROJECT_ID,
+  });
 }
 
 function userFromRequest(req) {
@@ -309,13 +333,13 @@ app.get("/api/config", (_req, res) => {
 });
 
 app.post("/api/auth/firebase", async (req, res) => {
-  if (!process.env.FIREBASE_ADMIN_PROJECT_ID || !process.env.FIREBASE_ADMIN_CLIENT_EMAIL || !process.env.FIREBASE_ADMIN_PRIVATE_KEY || !process.env.SESSION_SECRET) {
-    return res.status(503).json({ error: "Firebase Authentication is not configured on this server." });
+  if (!configured()) {
+    return res.status(503).json({ error: "Firebase Authentication or Gemini is not configured on this server." });
   }
   const idToken = req.body?.idToken;
   if (!idToken) return res.status(400).json({ error: "Missing Firebase ID token." });
   try {
-    const decoded = await getFirebaseAdminAuth().verifyIdToken(idToken);
+    const decoded = await verifyFirebaseIdToken(idToken);
     if (!decoded?.uid || !decoded.email) throw new Error("Firebase account identity could not be verified.");
     const user = {
       sub: decoded.uid,

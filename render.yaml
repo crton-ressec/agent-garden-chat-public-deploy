@@ -27,11 +27,5 @@ services:
         sync: false
       - key: FIREBASE_APP_ID
         sync: false
-      - key: FIREBASE_ADMIN_PROJECT_ID
-        sync: false
-      - key: FIREBASE_ADMIN_CLIENT_EMAIL
-        sync: false
-      - key: FIREBASE_ADMIN_PRIVATE_KEY
-        sync: false
       - key: SESSION_SECRET
         sync: false
