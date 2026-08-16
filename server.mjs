@@ -149,6 +149,17 @@ app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false 
 app.use(express.json({ limit: "14mb" }));
 app.use(cookieParser());
 
+function authRequired() {
+  return process.env.AUTH_REQUIRED !== "false";
+}
+
+const TEMP_TEST_USER = {
+  sub: "temporary-test-user",
+  email: "test-mode@agent-garden.local",
+  name: "Temporary test user",
+  picture: "",
+};
+
 function configured() {
   return requiredEnv.every((name) => Boolean(process.env[name]));
 }
@@ -195,8 +206,8 @@ function userFromRequest(req) {
 
 function requireUser(req, res, next) {
   const user = userFromRequest(req);
-  if (!user) return res.status(401).json({ error: "Please sign in with Google to continue." });
-  req.user = user;
+  if (!user && authRequired()) return res.status(401).json({ error: "Please sign in with Google to continue." });
+  req.user = user || TEMP_TEST_USER;
   next();
 }
 
@@ -310,6 +321,8 @@ async function callPollinations({ agent, message, history, files }) {
 
 app.get("/api/config", (_req, res) => {
   res.json({
+    authRequired: authRequired(),
+    testUser: authRequired() ? null : TEMP_TEST_USER,
     firebaseConfig: {
       apiKey: process.env.FIREBASE_API_KEY || "",
       authDomain: process.env.FIREBASE_AUTH_DOMAIN || "",
@@ -362,7 +375,7 @@ app.post("/api/auth/firebase", async (req, res) => {
 });
 
 app.get("/api/auth/me", (req, res) => {
-  res.json({ user: userFromRequest(req) });
+  res.json({ user: userFromRequest(req) || (authRequired() ? null : TEMP_TEST_USER), authRequired: authRequired(), testUser: authRequired() ? null : TEMP_TEST_USER });
 });
 
 app.post("/api/auth/logout", (_req, res) => {
