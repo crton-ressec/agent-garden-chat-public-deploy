@@ -137,6 +137,15 @@ function App() {
     const updateDiagnostics = (patch) => {
       if (activeEffect) setAuthDiagnostics((current) => ({ ...(current || {}), ...patch, capturedAt: new Date().toISOString() }));
     };
+    const inspectClientState = async () => {
+      let localStorageKeys = [];
+      let sessionStorageKeys = [];
+      let indexedDbNames = [];
+      try { localStorageKeys = Object.keys(localStorage).filter((key) => /firebase|auth|agent/i.test(key)); } catch (error) { localStorageKeys = [`blocked:${error?.name || "storage-error"}`]; }
+      try { sessionStorageKeys = Object.keys(sessionStorage).filter((key) => /firebase|auth|agent/i.test(key)); } catch (error) { sessionStorageKeys = [`blocked:${error?.name || "storage-error"}`]; }
+      try { indexedDbNames = (await indexedDB.databases()).map((item) => item.name).filter(Boolean).filter((name) => /firebase|auth|agent/i.test(name)); } catch (error) { indexedDbNames = [`unavailable:${error?.name || "indexeddb-error"}`]; }
+      return { localStorageKeys, sessionStorageKeys, indexedDbNames, referrerOrigin: document.referrer ? new URL(document.referrer).origin : null, userAgent: navigator.userAgent, online: navigator.onLine, authDomain: auth.config?.authDomain || null, projectId: auth.config?.apiKey ? config.firebaseConfig.projectId : null };
+    };
     const exchangeFirebaseUser = async (firebaseUser, source = "auth-state") => {
       if (!firebaseUser || !activeEffect) return;
       updateDiagnostics({ stage: "firebase-user-received", userSource: source, firebaseUser: { uidPresent: Boolean(firebaseUser.uid), emailPresent: Boolean(firebaseUser.email), providerIds: firebaseUser.providerData?.map((item) => item.providerId) || [] } });
@@ -160,10 +169,10 @@ function App() {
     };
     (async () => {
       try {
-        updateDiagnostics({ stage: "waiting-for-firebase", configLoaded: true, persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, redirectPendingMarker: sessionStorage.getItem("agent_garden_redirect_pending") === "1" });
+        updateDiagnostics({ stage: "waiting-for-firebase", configLoaded: true, persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, redirectPendingMarker: sessionStorage.getItem("agent_garden_redirect_pending") === "1", clientState: await inspectClientState() });
         await auth.authStateReady();
         const redirectResult = await getRedirectResult(auth);
-        updateDiagnostics({ stage: redirectResult?.user || auth.currentUser ? "redirect-result-found" : "redirect-result-empty", redirectResult: { userReturned: Boolean(redirectResult?.user), credentialPresent: Boolean(redirectResult?.credential), operationType: redirectResult?.operationType || null }, currentUserPresent: Boolean(auth.currentUser) });
+        updateDiagnostics({ stage: redirectResult?.user || auth.currentUser ? "redirect-result-found" : "redirect-result-empty", redirectResult: { userReturned: Boolean(redirectResult?.user), credentialPresent: Boolean(redirectResult?.credential), operationType: redirectResult?.operationType || null }, currentUserPresent: Boolean(auth.currentUser), afterAuthStateReady: await inspectClientState() });
         sessionStorage.removeItem("agent_garden_redirect_pending");
         if (redirectResult?.user) await exchangeFirebaseUser(redirectResult.user, "redirect-result");
         else if (auth.currentUser) await exchangeFirebaseUser(auth.currentUser, "current-user");
@@ -172,7 +181,7 @@ function App() {
         if (activeEffect) setNotice(error.message || "Firebase redirect sign-in could not be completed.");
       }
     })();
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => { exchangeFirebaseUser(firebaseUser); });
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => { updateDiagnostics({ authStateListener: firebaseUser ? "user-received" : "null-received", listenerUserPresent: Boolean(firebaseUser) }); exchangeFirebaseUser(firebaseUser); });
     return () => { activeEffect = false; unsubscribe(); };
   }, [config.firebaseConfig?.apiKey]);
 
