@@ -208,6 +208,21 @@ function App() {
     }
   }
 
+  async function resetGoogleState() {
+    try {
+      const auth = getAuth(getApp());
+      await firebaseSignOut(auth);
+      Object.keys(localStorage).filter((key) => /firebase|auth/i.test(key)).forEach((key) => localStorage.removeItem(key));
+      sessionStorage.removeItem("agent_garden_redirect_pending");
+      setUser(null);
+      setNotice("");
+      setAuthDiagnostics({ stage: "local-auth-state-reset", resetLocalStorage: true, resetSessionMarker: true, capturedAt: new Date().toISOString() });
+    } catch (error) {
+      setAuthDiagnostics({ stage: "auth-state-reset-error", error: { name: error?.name || "Error", code: error?.code || null, message: error?.message || String(error) }, capturedAt: new Date().toISOString() });
+      setNotice(error.message || "Could not reset local Google sign-in state.");
+    }
+  }
+
   async function copyDiagnostics() {
     if (!authDiagnostics) return;
     const report = JSON.stringify(authDiagnostics, null, 2);
@@ -443,7 +458,7 @@ function App() {
         <div className="activity-log"><div className="activity-title"><span>Activity</span><span className="live-status"><i />Live</span></div>{agentLog.length === 0 ? <div className="empty-activity">Your agent activity will appear here.</div> : agentLog.slice(-4).reverse().map((item) => <div className="activity-item" key={item.id}><span className={`activity-state ${item.status}`} /> <div>{item.label}<small>{item.time}</small></div></div>)}</div>
       </aside>
 
-      {!user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Firebase-powered workspace</span><h2>Sign up or sign in to continue</h2><p>Use your Google account to create or access your Agent Garden account. Firebase handles authentication; the app does not request Gmail, Drive, or other Google data.</p>{config.firebaseConfig?.apiKey ? <button className="firebase-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={18} /><span>{signingIn ? "Connecting…" : "Continue with Google"}</span></button> : <div className="setup-warning"><strong>Firebase Authentication needs configuration.</strong><span>Add the Firebase web configuration and Admin service-account variables in Render, then reload this page.</span></div>}{notice && <div className="notice error">{notice}</div>}{authDiagnostics && <div className="auth-diagnostics"><div className="diagnostics-heading"><strong>Sign-in diagnostics</strong><button className="diagnostics-copy" onClick={copyDiagnostics}>{diagnosticsCopied ? <Check size={14} /> : <Copy size={14} />}{diagnosticsCopied ? "Copied" : "Copy report"}</button></div><p>Safe to paste here: tokens, cookies, and secret values are not included.</p><pre>{JSON.stringify(authDiagnostics, null, 2)}</pre></div>}<small>Authentication is provided by Firebase. Agent Garden is an independently built workspace.</small></div></div>}
+      {!user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Firebase-powered workspace</span><h2>Sign up or sign in to continue</h2><p>Use your Google account to create or access your Agent Garden account. Firebase handles authentication; the app does not request Gmail, Drive, or other Google data.</p>{config.firebaseConfig?.apiKey ? <button className="firebase-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={18} /><span>{signingIn ? "Connecting…" : "Continue with Google"}</span></button> : <div className="setup-warning"><strong>Firebase Authentication needs configuration.</strong><span>Add the Firebase web configuration and Admin service-account variables in Render, then reload this page.</span></div>}{notice && <div className="notice error">{notice}</div>}{authDiagnostics && <div className="auth-diagnostics"><div className="diagnostics-heading"><strong>Sign-in diagnostics</strong><span><button className="diagnostics-copy" onClick={resetGoogleState}>Reset state</button> <button className="diagnostics-copy" onClick={copyDiagnostics}>{diagnosticsCopied ? <Check size={14} /> : <Copy size={14} />}{diagnosticsCopied ? "Copied" : "Copy report"}</button></span></div><p>Safe to paste here: tokens, cookies, and secret values are not included.</p><pre>{JSON.stringify(authDiagnostics, null, 2)}</pre></div>}<small>Authentication is provided by Firebase. Agent Garden is an independently built workspace.</small></div></div>}
       {notice && user && <div className="notice toast error"><button onClick={() => setNotice("")}><X size={14} /></button>{notice}</div>}
     </div>
   );
