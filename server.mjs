@@ -146,7 +146,6 @@ function resolveAgent(requestedId, message, files) {
 
 app.set("trust proxy", 1);
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-app.use(["/__/auth", "/__/firebase"], express.raw({ type: "*/*", limit: "2mb" }));
 app.use(express.json({ limit: "14mb" }));
 app.use(cookieParser());
 
@@ -309,37 +308,11 @@ async function callPollinations({ agent, message, history, files }) {
   return { answer, provider: "Pollinations", sources: [] };
 }
 
-app.use(["/__/auth", "/__/firebase"], async (req, res) => {
-  const upstreamDomain = process.env.FIREBASE_AUTH_DOMAIN;
-  if (!upstreamDomain) return res.status(503).send("Firebase auth domain is not configured.");
-  const upstreamUrl = `https://${upstreamDomain}${req.originalUrl}`;
-  try {
-    const headers = new Headers();
-    for (const [key, value] of Object.entries(req.headers)) {
-      if (value && !["host", "content-length", "connection"].includes(key.toLowerCase())) headers.set(key, Array.isArray(value) ? value.join(", ") : value);
-    }
-    const upstream = await fetch(upstreamUrl, {
-      method: req.method,
-      headers,
-      body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
-      redirect: "manual",
-    });
-    res.status(upstream.status);
-    upstream.headers.forEach((value, key) => {
-      if (!['content-length', 'transfer-encoding', 'connection'].includes(key.toLowerCase())) res.setHeader(key, value);
-    });
-    res.send(Buffer.from(await upstream.arrayBuffer()));
-  } catch (error) {
-    res.status(502).send(`Firebase auth helper proxy failed: ${error.message}`);
-  }
-});
-
-app.get("/api/config", (req, res) => {
-  const authDomain = process.env.FIREBASE_AUTH_DOMAIN_OVERRIDE || (isProduction ? req.get("host") : process.env.FIREBASE_AUTH_DOMAIN) || "";
+app.get("/api/config", (_req, res) => {
   res.json({
     firebaseConfig: {
       apiKey: process.env.FIREBASE_API_KEY || "",
-      authDomain,
+      authDomain: process.env.FIREBASE_AUTH_DOMAIN || "",
       projectId: process.env.FIREBASE_PROJECT_ID || "",
       storageBucket: process.env.FIREBASE_STORAGE_BUCKET || "",
       messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "",
