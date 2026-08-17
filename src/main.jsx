@@ -166,6 +166,7 @@ function App() {
   const [e2bPhase, setE2bPhase] = useState("idle");
   const [e2bStartedAt, setE2bStartedAt] = useState(null);
   const [e2bElapsed, setE2bElapsed] = useState(0);
+  const [e2bExecutionId, setE2bExecutionId] = useState(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const endRef = useRef(null);
@@ -441,15 +442,50 @@ function App() {
 
   useEffect(() => {
     if (!chatExecutionLive?.active || !chatExecutionLive.startedAt) return undefined;
-    const timer = window.setInterval(() => setChatExecutionLive((current) => current ? { ...current, elapsed: Math.max(0, Math.round((Date.now() - current.startedAt) / 1000)), phase: current.elapsed < 1 ? "provisioning" : current.elapsed < 4 ? "running" : "finalizing" } : current), 250);
+    const timer = window.setInterval(() => setChatExecutionLive((current) => current ? { ...current, elapsed: Math.max(0, Math.round((Date.now() - current.startedAt) / 1000)) } : current), 250);
     return () => window.clearInterval(timer);
   }, [chatExecutionLive?.active, chatExecutionLive?.startedAt]);
+
+  useEffect(() => {
+    if (!chatExecutionLive?.active || !chatExecutionLive.id) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/e2b/progress/${encodeURIComponent(chatExecutionLive.id)}?client=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled) setChatExecutionLive((current) => current ? { ...current, ...data, elapsed: Math.max(0, Math.round((Date.now() - (current.startedAt || Date.now())) / 1000)) } : current);
+      } catch { /* the completed chat response still contains the full transcript */ }
+    };
+    poll();
+    const timer = window.setInterval(poll, 300);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [chatExecutionLive?.active, chatExecutionLive?.id]);
 
   useEffect(() => {
     if (!e2bBusy || !e2bStartedAt) return undefined;
     const timer = window.setInterval(() => setE2bElapsed(Math.max(0, Math.round((Date.now() - e2bStartedAt) / 1000))), 250);
     return () => window.clearInterval(timer);
   }, [e2bBusy, e2bStartedAt]);
+
+  useEffect(() => {
+    if (!e2bBusy || !e2bExecutionId) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/e2b/progress/${encodeURIComponent(e2bExecutionId)}?client=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled) {
+          setE2bPhase(data.phase === "finalizing" ? "finalizing" : data.phase === "completed" ? "complete" : "running");
+          setE2bOutput([data.stdout && `STDOUT\n${data.stdout}`, data.stderr && `STDERR\n${data.stderr}`, data.exitCode !== undefined && `Exit code: ${data.exitCode}`].filter(Boolean).join("\n\n"));
+        }
+      } catch { /* final response still updates the modal */ }
+    };
+    poll();
+    const timer = window.setInterval(poll, 300);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [e2bBusy, e2bExecutionId]);
 
   async function saveMessageAsFile(message) {
     try {
@@ -470,11 +506,12 @@ function App() {
   }
 
   async function runInE2B() {
-    setE2bBusy(true); setE2bPhase("provisioning"); setE2bStartedAt(Date.now()); setE2bElapsed(0); setE2bOutput("");
+    const executionId = crypto.randomUUID();
+    setE2bExecutionId(executionId); setE2bBusy(true); setE2bPhase("provisioning"); setE2bStartedAt(Date.now()); setE2bElapsed(0); setE2bOutput("");
     try {
       await new Promise((resolve) => window.setTimeout(resolve, 350));
       setE2bPhase("running");
-      const response = await fetch("/api/e2b/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language: e2bLanguage, code: e2bCode, timeoutMs: 20000 }) });
+      const response = await fetch("/api/e2b/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language: e2bLanguage, code: e2bCode, timeoutMs: 20000, executionId }) });
       setE2bPhase("finalizing");
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "E2B execution failed.");
@@ -506,7 +543,8 @@ function App() {
     setSending(true);
     setNotice("");
     const executionIntent = /\b(run|execute|test|plot|chart|graph|visuali[sz]e)\b[\s\S]{0,80}\b(python|python3|javascript|node|bash|shell|code|script|data|chart|plot)\b/i.test(message) || /```(?:python|py|javascript|js|bash|sh)?/i.test(message);
-    if (executionIntent) setChatExecutionLive({ active: true, phase: "provisioning", elapsed: 0, startedAt: Date.now(), command: "ubuntu@sandbox:~$ python3 /tmp/agent-garden-share/agent-garden-script.py" });
+    const executionId = executionIntent ? crypto.randomUUID() : null;
+    if (executionIntent) setChatExecutionLive({ id: executionId, active: true, phase: "provisioning", elapsed: 0, startedAt: Date.now(), stdout: "", stderr: "", command: "ubuntu@sandbox:~$ preparing E2B command" });
 
     try {
       const result = await fetch("/api/chat", {
@@ -519,13 +557,14 @@ function App() {
           files: outboundFiles,
           history: messages.map(({ role, content }) => ({ role, content })),
           chatId,
+          executionId,
         }),
       });
       const data = await result.json();
       if (!result.ok) throw new Error(data.error || "The provider did not return an answer.");
       if (data.chatId) setChatId(data.chatId);
       if (data.persistenceNotice) setNotice(data.persistenceNotice);
-      if (data.execution) setChatExecutionLive({ ...data.execution, active: false, phase: data.execution.status === "awaiting_code" ? "awaiting_code" : "completed", elapsed: Math.round((data.execution.durationMs || 0) / 1000) });
+      if (data.execution) setChatExecutionLive((current) => ({ ...(current || {}), ...data.execution, active: false, phase: data.execution.status === "awaiting_code" ? "awaiting_code" : "completed", elapsed: Math.round((data.execution.durationMs || 0) / 1000) }));
       setMessages((current) => [...current, {
         id: crypto.randomUUID(),
         role: "assistant",
@@ -627,7 +666,7 @@ function App() {
                   </div>
                 </article>
               ))}
-              {sending && <>{chatExecutionLive?.active && <article className="message-row assistant"><div className="agent-avatar"><Route size={16} /></div><div className="live-terminal"><div className="live-terminal-header"><span className="execution-status-dot running" /><strong>{chatExecutionLive.phase === "provisioning" ? "Provisioning E2B sandbox" : chatExecutionLive.phase === "finalizing" ? "Collecting output and files" : "Running in E2B"}</strong><span>{chatExecutionLive.elapsed || 0}s</span></div><div className="live-terminal-body"><div className="live-terminal-line"><span>ubuntu@sandbox:~$</span> python3 /tmp/agent-garden-share/agent-garden-script.py</div><div className="live-terminal-line muted">{chatExecutionLive.phase === "provisioning" ? "Connecting to isolated Ubuntu sandbox…" : chatExecutionLive.phase === "running" ? "Process is running; stdout will appear when emitted…" : "Finalizing process and collecting generated files…"}</div><span className="terminal-cursor" /></div></div></article>}<article className="message-row assistant"><div className="agent-avatar"><Sparkles size={16} /></div><div className="thinking"><LoaderCircle className="spin" size={17} />{active?.label || "Agent"} is working…</div></article></>}
+              {sending && <>{chatExecutionLive?.active && <article className="message-row assistant"><div className="agent-avatar"><Route size={16} /></div><div className="live-terminal"><div className="live-terminal-header"><span className="execution-status-dot running" /><strong>{chatExecutionLive.phase === "provisioning" ? "Provisioning E2B sandbox" : chatExecutionLive.phase === "finalizing" ? "Collecting output and files" : "Running in E2B"}</strong><span>{chatExecutionLive.elapsed || 0}s</span></div><div className="live-terminal-body"><div className="live-terminal-line"><span>ubuntu@sandbox:~$</span> {chatExecutionLive.command || "preparing E2B command"}</div><div className="live-terminal-line muted">{chatExecutionLive.phase === "provisioning" ? "Connecting to isolated Ubuntu sandbox…" : chatExecutionLive.phase === "running" ? "Process is running; streaming terminal output…" : "Finalizing process and collecting generated files…"}</div>{(chatExecutionLive.stdout || chatExecutionLive.stderr) && <pre className="live-terminal-output">{[chatExecutionLive.stdout && `STDOUT\n${chatExecutionLive.stdout}`, chatExecutionLive.stderr && `STDERR\n${chatExecutionLive.stderr}`].filter(Boolean).join("\n\n")}</pre>}<span className="terminal-cursor" /></div></div></article>}<article className="message-row assistant"><div className="agent-avatar"><Sparkles size={16} /></div><div className="thinking"><LoaderCircle className="spin" size={17} />{active?.label || "Agent"} is working…</div></article></>}
               <div ref={endRef} />
             </div>
           )}

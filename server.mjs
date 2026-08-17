@@ -44,6 +44,7 @@ const STORAGE_SECRET_ACCESS_KEY = process.env.TIGRIS_SECRET_ACCESS_KEY || proces
 const STORAGE_READY = Boolean(STORAGE_BUCKET && STORAGE_ENDPOINT && STORAGE_ACCESS_KEY_ID && STORAGE_SECRET_ACCESS_KEY);
 const storage = STORAGE_READY ? new S3Client({ region: STORAGE_REGION, endpoint: STORAGE_ENDPOINT, forcePathStyle: false, credentials: { accessKeyId: STORAGE_ACCESS_KEY_ID, secretAccessKey: STORAGE_SECRET_ACCESS_KEY } }) : null;
 const E2B_READY = Boolean(process.env.E2B_API_KEY);
+const executionProgress = new Map();
 const MAX_STORAGE_FILE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "application/pdf", "application/json", "text/csv", "text/javascript", "application/javascript", "application/typescript", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif"]);
 
@@ -161,7 +162,7 @@ const AGENTS = {
     icon: "Code2",
     description: "Designs, writes, and explains practical code changes.",
     provider: "Gemini",
-    prompt: "You are a senior software engineer. Give secure, runnable, minimal solutions. Explain assumptions, include only necessary code, and call out commands, files, and testing steps. Never claim you ran code unless results are included in the prompt.",
+    prompt: "You are the Coder agent inside Agent Garden. You have access to a real isolated E2B Ubuntu computer through the execution tool. When the user asks to run, execute, test, plot, calculate, inspect, or debug code, use the E2B computer path rather than claiming you cannot execute code. Give secure, runnable, minimal solutions, explain assumptions, and report the actual terminal command, stdout, stderr, exit code, and generated files returned by E2B. Never claim execution unless results are included in the prompt.",
   },
   debugger: {
     label: "Debugger",
@@ -402,15 +403,17 @@ function extractExecutionRequest(message) {
   return { language, code };
 }
 
-async function generateExecutionCode({ message, history }) {
+async function generateExecutionCode({ message, language = "python", history }) {
   if (!gemini) throw new Error("Gemini is not configured to generate execution code.");
+  const normalized = String(language || "python").toLowerCase();
+  const languageLabel = normalized === "bash" || normalized === "sh" ? "Bash shell" : normalized === "javascript" || normalized === "js" || normalized === "node" ? "JavaScript for Node.js" : "Python 3";
   const response = await gemini.models.generateContent({
     model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
-    contents: [{ role: "user", parts: [{ text: `Write a complete Python 3 script for this user request: ${message}\\n\\nReturn only executable Python code, with no Markdown fences or explanation. The script must save any generated visual or data artifact to the /tmp/agent-garden-share directory and print the exact output filename. For charts, prefer a self-contained SVG or CSV using the Python standard library; do not assume third-party packages such as matplotlib are installed. Do not access secrets, the network, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
-    config: { systemInstruction: "You generate safe, self-contained Python scripts for an isolated sandbox. Return code only.", temperature: 0.15, maxOutputTokens: 5000 },
+    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. The script must save any generated visual or data artifact to the /tmp/agent-garden-share directory and print the exact output filename. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Do not access secrets, the network, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
+    config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only.`, temperature: 0.15, maxOutputTokens: 5000 },
   });
   const raw = response.text?.trim() || "";
-  const fenced = raw.match(/```(?:python|py)?\\s*([\\s\\S]*?)```/i);
+  const fenced = raw.match(/```(?:python|py|javascript|js|node|bash|sh)?\\s*([\\s\\S]*?)```/i);
   return (fenced ? fenced[1] : raw).trim();
 }
 
@@ -438,7 +441,13 @@ async function collectE2BArtifacts({ sandbox, userId, codePath }) {
   return artifacts;
 }
 
-async function executeInE2B({ language, code, timeoutMs = 20000, userId }) {
+function publishExecutionProgress(id, patch) {
+  if (!id) return;
+  const current = executionProgress.get(id) || { stdout: "", stderr: "", phase: "provisioning", startedAt: Date.now() };
+  executionProgress.set(id, { ...current, ...patch, updatedAt: Date.now() });
+}
+
+async function executeInE2B({ language, code, timeoutMs = 20000, userId, progressId }) {
   if (!E2B_READY) throw new Error("E2B execution is not configured on the server yet.");
   const normalized = String(language || "python").toLowerCase();
   const allowedLanguages = new Set(["python", "python3", "py", "javascript", "js", "node", "bash", "sh"]);
@@ -453,16 +462,25 @@ async function executeInE2B({ language, code, timeoutMs = 20000, userId }) {
     const codePath = `/tmp/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
     await sandbox.files.write(codePath, String(code));
     const command = extension === "py" ? `mkdir -p /tmp/agent-garden-share && cd /tmp/agent-garden-share && python3 ${codePath}` : extension === "sh" ? `mkdir -p /tmp/agent-garden-share && cd /tmp/agent-garden-share && bash ${codePath}` : `mkdir -p /tmp/agent-garden-share && cd /tmp/agent-garden-share && node ${codePath}`;
+    publishExecutionProgress(progressId, { phase: "running", language: normalized, command, stdout: "", stderr: "" });
     let execution;
     try {
-      execution = await sandbox.commands.run(command, { timeoutMs: safeTimeout });
+      execution = await sandbox.commands.run(command, {
+        timeoutMs: safeTimeout,
+        onStdout: (chunk) => publishExecutionProgress(progressId, { phase: "running", stdout: `${executionProgress.get(progressId)?.stdout || ""}${chunk}` }),
+        onStderr: (chunk) => publishExecutionProgress(progressId, { phase: "running", stderr: `${executionProgress.get(progressId)?.stderr || ""}${chunk}` }),
+      });
     } catch (commandError) {
       execution = { stdout: commandError.stdout || "", stderr: commandError.stderr || commandError.message || "Process exited with an error.", exitCode: commandError.exitCode ?? 1 };
     }
+    publishExecutionProgress(progressId, { phase: "finalizing", stdout: execution.stdout || "", stderr: execution.stderr || "", exitCode: execution.exitCode ?? 0 });
     let artifacts = [];
     let artifactNotice = "";
     try { artifacts = await collectE2BArtifacts({ sandbox, userId, codePath }); } catch (artifactError) { artifactNotice = `The code ran, but generated files could not be saved: ${artifactError.message}`; }
-    return { language: normalized, code: String(code), command, stdout: execution.stdout || "", stderr: execution.stderr || "", exitCode: execution.exitCode ?? 0, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", artifacts, artifactNotice };
+    const finalExecution = { language: normalized, code: String(code), command, stdout: execution.stdout || "", stderr: execution.stderr || "", exitCode: execution.exitCode ?? 0, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", artifacts, artifactNotice };
+    publishExecutionProgress(progressId, { phase: "completed", ...finalExecution });
+    if (progressId) setTimeout(() => executionProgress.delete(progressId), 10 * 60 * 1000).unref?.();
+    return finalExecution;
   } finally { try { await sandbox?.kill(); } catch {} }
 }
 
@@ -711,8 +729,14 @@ app.delete("/api/storage/object", requireUser, async (req, res) => {
   catch (error) { res.status(502).json({ error: error.message || "Could not delete the file." }); }
 });
 
+app.get("/api/e2b/progress/:id", requireUser, (req, res) => {
+  const progress = executionProgress.get(String(req.params.id));
+  if (!progress) return res.status(404).json({ error: "Execution progress is no longer available." });
+  res.json(progress);
+});
+
 app.post("/api/e2b/run", requireUser, userRateLimit, async (req, res) => {
-  try { res.json({ ok: true, ...(await executeInE2B({ language: req.body?.language, code: req.body?.code, timeoutMs: req.body?.timeoutMs, userId: req.user.sub })) }); }
+  try { res.json({ ok: true, ...(await executeInE2B({ language: req.body?.language, code: req.body?.code, timeoutMs: req.body?.timeoutMs, userId: req.user.sub, progressId: req.body?.executionId })) }); }
   catch (error) { res.status(502).json({ error: error.message || "E2B execution failed." }); }
 });
 
@@ -751,11 +775,11 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
     let result;
     if (execute) {
       const request = extractExecutionRequest(message);
-      if (generateCode) request.code = await generateExecutionCode({ message, history: req.body?.history });
+      if (generateCode) request.code = await generateExecutionCode({ message, language: request.language, history: req.body?.history });
       if (!request.code) {
         result = { answer: `## Ready to run\n\nI detected a ${request.language} execution request, but no code was included. Paste the code in a fenced block or write it after a colon, for example:\n\n\`\`\`${request.language}\nprint(2 + 3)\n\`\`\``, provider: "E2B", sources: [], execution: { status: "awaiting_code", language: request.language, code: "", stdout: "", stderr: "", exitCode: null, sandbox: "e2b", artifacts: [] } };
       } else {
-        const execution = await executeInE2B({ ...request, userId: req.user.sub });
+        const execution = await executeInE2B({ ...request, userId: req.user.sub, progressId: req.body?.executionId });
         const output = [execution.stdout && `STDOUT\n${execution.stdout.trim()}`, execution.stderr && `STDERR\n${execution.stderr.trim()}`, `Exit code: ${execution.exitCode}`].filter(Boolean).join("\n\n");
         const fence = "```";
         const artifactText = execution.artifacts?.length ? `\n\n### Saved files\n\n${execution.artifacts.map((artifact) => `- [${artifact.name}](${artifact.url}) — ${(artifact.size / 1024).toFixed(1)} KB, saved to Workspace files`).join("\n")}` : execution.artifactNotice ? `\n\n> ${execution.artifactNotice}` : "";
