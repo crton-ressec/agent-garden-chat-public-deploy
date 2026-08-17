@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { browserLocalPersistence, getAuth, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, setPersistence, signInWithRedirect, signOut as firebaseSignOut } from "firebase/auth";
@@ -19,7 +19,10 @@ import {
   MessageSquarePlus,
   MoreHorizontal,
   Copy,
+  Download,
   Paperclip,
+  RefreshCw,
+  Trash2,
   PanelLeftClose,
   Plus,
   PanelLeftOpen,
@@ -79,25 +82,49 @@ function iconFor(name) {
   return icons[name] || Sparkles;
 }
 
+function InlineMarkdown({ text }) {
+  const tokens = String(text || "").split(/(\[[^\]]+\]\([^\)]+\)|`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)/g).filter(Boolean);
+  return tokens.map((token, index) => {
+    const link = token.match(/^\[([^\]]+)\]\(([^\)]+)\)$/);
+    if (link) return <a key={index} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>;
+    if (token.startsWith("`") && token.endsWith("`")) return <code className="inline-code" key={index}>{token.slice(1, -1)}</code>;
+    if ((token.startsWith("**") && token.endsWith("**")) || (token.startsWith("__") && token.endsWith("__"))) return <strong key={index}>{token.slice(2, -2)}</strong>;
+    if ((token.startsWith("*") && token.endsWith("*")) || (token.startsWith("_") && token.endsWith("_"))) return <em key={index}>{token.slice(1, -1)}</em>;
+    return <Fragment key={index}>{token}</Fragment>;
+  });
+}
+
 function PreviewText({ text }) {
-  const pieces = String(text || "").split(/(```[\s\S]*?```)/g);
-  return (
-    <div className="message-copy">
-      {pieces.map((piece, index) => {
-        if (piece.startsWith("```")) {
-          const code = piece.replace(/^```[\w-]*\n?/, "").replace(/```$/, "");
-          return <pre key={index}><code>{code}</code></pre>;
-        }
-        return piece.split("\n").map((line, lineIndex) => {
-          if (line.startsWith("### ")) return <h3 key={`${index}-${lineIndex}`}>{line.slice(4)}</h3>;
-          if (line.startsWith("## ")) return <h2 key={`${index}-${lineIndex}`}>{line.slice(3)}</h2>;
-          if (line.startsWith("# ")) return <h1 key={`${index}-${lineIndex}`}>{line.slice(2)}</h1>;
-          if (/^[-*] /.test(line)) return <div className="list-line" key={`${index}-${lineIndex}`}><span>•</span>{line.slice(2)}</div>;
-          return <React.Fragment key={`${index}-${lineIndex}`}>{line}{lineIndex < piece.split("\n").length - 1 && <br />}</React.Fragment>;
-        });
-      })}
-    </div>
-  );
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  const blocks = [];
+  let index = 0;
+  while (index < lines.length) {
+    if (!lines[index].trim()) { index += 1; continue; }
+    if (lines[index].startsWith("```")) {
+      const language = lines[index].slice(3).trim(); const code = []; index += 1;
+      while (index < lines.length && !lines[index].startsWith("```")) code.push(lines[index++]);
+      index += 1; blocks.push({ type: "code", language, value: code.join("\n") }); continue;
+    }
+    if (/^\|.*\|$/.test(lines[index]) && index + 1 < lines.length && /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?$/.test(lines[index + 1])) {
+      const headers = lines[index].split("|").slice(1, -1).map((cell) => cell.trim()); index += 2; const rows = [];
+      while (index < lines.length && /^\|.*\|$/.test(lines[index])) { rows.push(lines[index].split("|").slice(1, -1).map((cell) => cell.trim())); index += 1; }
+      blocks.push({ type: "table", headers, rows }); continue;
+    }
+    const heading = lines[index].match(/^(#{1,6})\s+(.+)$/); if (heading) { blocks.push({ type: "heading", level: heading[1].length, value: heading[2] }); index += 1; continue; }
+    if (/^>\s?/.test(lines[index])) { const quote = []; while (index < lines.length && /^>\s?/.test(lines[index])) quote.push(lines[index++].replace(/^>\s?/, "")); blocks.push({ type: "quote", value: quote.join(" ") }); continue; }
+    if (/^[-*+]\s+/.test(lines[index])) { const items = []; while (index < lines.length && /^[-*+]\s+/.test(lines[index])) items.push(lines[index++].replace(/^[-*+]\s+/, "")); blocks.push({ type: "ul", items }); continue; }
+    if (/^\d+[.)]\s+/.test(lines[index])) { const items = []; while (index < lines.length && /^\d+[.)]\s+/.test(lines[index])) items.push(lines[index++].replace(/^\d+[.)]\s+/, "")); blocks.push({ type: "ol", items }); continue; }
+    const paragraph = [lines[index++]]; while (index < lines.length && lines[index].trim() && !/^(#{1,6})\s+|^```|^>\s?|^[-*+]\s+|^\d+[.)]\s+|^\|.*\|$/.test(lines[index])) paragraph.push(lines[index++]); blocks.push({ type: "p", value: paragraph.join(" ") });
+  }
+  return <div className="message-copy">{blocks.map((block, blockIndex) => {
+    if (block.type === "code") return <div className="code-block" key={blockIndex}><div className="code-label">{block.language || "code"}</div><pre><code>{block.value}</code></pre></div>;
+    if (block.type === "heading") { const Tag = `h${Math.min(6, block.level)}`; return <Tag key={blockIndex}><InlineMarkdown text={block.value} /></Tag>; }
+    if (block.type === "quote") return <blockquote key={blockIndex}><InlineMarkdown text={block.value} /></blockquote>;
+    if (block.type === "ul") return <ul key={blockIndex}>{block.items.map((item, itemIndex) => <li key={itemIndex}><InlineMarkdown text={item} /></li>)}</ul>;
+    if (block.type === "ol") return <ol key={blockIndex}>{block.items.map((item, itemIndex) => <li key={itemIndex}><InlineMarkdown text={item} /></li>)}</ol>;
+    if (block.type === "table") return <div className="table-scroll" key={blockIndex}><table><thead><tr>{block.headers.map((header) => <th key={header}><InlineMarkdown text={header} /></th>)}</tr></thead><tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{block.headers.map((_, cellIndex) => <td key={cellIndex}><InlineMarkdown text={row[cellIndex] || ""} /></td>)}</tr>)}</tbody></table></div>;
+    return <p key={blockIndex}><InlineMarkdown text={block.value} /></p>;
+  })}</div>;
 }
 
 function App() {
@@ -126,12 +153,19 @@ function App() {
   const [aiMemoryEnabled, setAiMemoryEnabled] = useState(false);
   const [sectionMemory, setSectionMemory] = useState(Object.fromEntries(ONBOARDING_SECTIONS.map((section) => [section.id, true])));
   const [profileLoading, setProfileLoading] = useState(false);
+  const [workspaceFiles, setWorkspaceFiles] = useState([]);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [filesLoading, setFilesLoading] = useState(false);
   const [chatId, setChatId] = useState(null);
+  const [chatExecutionLive, setChatExecutionLive] = useState(null);
   const [e2bOpen, setE2bOpen] = useState(false);
   const [e2bLanguage, setE2bLanguage] = useState("python");
   const [e2bCode, setE2bCode] = useState("print('Hello from Agent Garden')");
   const [e2bOutput, setE2bOutput] = useState("");
   const [e2bBusy, setE2bBusy] = useState(false);
+  const [e2bPhase, setE2bPhase] = useState("idle");
+  const [e2bStartedAt, setE2bStartedAt] = useState(null);
+  const [e2bElapsed, setE2bElapsed] = useState(0);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const endRef = useRef(null);
@@ -240,17 +274,33 @@ function App() {
       .then((response) => response.ok ? response.json() : null)
       .then((data) => {
         if (cancelled || !data) return;
-        setProfile(data);
+        const normalizedUser = { ...user, ...(data.user || {}), onboardingComplete: Boolean(data.user?.onboardingComplete ?? data.user?.onboarding_complete ?? user.onboardingComplete), aiMemoryEnabled: Boolean(data.user?.aiMemoryEnabled ?? data.user?.ai_memory_enabled ?? user.aiMemoryEnabled) };
+        setProfile({ ...data, user: normalizedUser });
+        setUser((current) => ({ ...(current || {}), ...normalizedUser }));
         const answers = {};
         (data.answers || []).forEach((answer) => { answers[`${answer.section}.${answer.key}`] = answer.value; });
         setOnboardingAnswers(answers);
-        setAiMemoryEnabled(data.user?.ai_memory_enabled ?? user.aiMemoryEnabled ?? false);
-        if (!data.user?.onboarding_complete) setOnboardingOpen(true);
+        setAiMemoryEnabled(normalizedUser.aiMemoryEnabled);
+        setOnboardingOpen(!normalizedUser.onboardingComplete);
       })
       .catch(() => undefined)
       .finally(() => { if (!cancelled) setProfileLoading(false); });
     return () => { cancelled = true; };
   }, [user, config.authRequired]);
+
+  const loadWorkspaceFiles = useCallback(async () => {
+    if (!user) return;
+    setFilesLoading(true);
+    try {
+      const response = await fetch(`/api/storage/files?client=${Date.now()}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not load workspace files.");
+      setWorkspaceFiles(data.files || []);
+    } catch (error) { setNotice(error.message); }
+    finally { setFilesLoading(false); }
+  }, [user]);
+
+  useEffect(() => { if (user) loadWorkspaceFiles(); }, [user, loadWorkspaceFiles]);
 
   useEffect(() => {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
@@ -300,6 +350,9 @@ function App() {
       const response = await fetch("/api/profile/onboarding", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers, aiMemoryEnabled, completed: true }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Could not save your onboarding profile.");
+      setUser((current) => ({ ...(current || {}), onboardingComplete: true, aiMemoryEnabled: Boolean(aiMemoryEnabled) }));
+      setProfile((current) => ({ ...(current || {}), user: { ...(current?.user || {}), onboardingComplete: true, aiMemoryEnabled: Boolean(aiMemoryEnabled) } }));
+      setOnboardingSection(0);
       setOnboardingOpen(false);
       setNotice("Your personalization settings were saved.");
     } catch (error) { setNotice(error.message); }
@@ -382,18 +435,52 @@ function App() {
       } catch { return file; }
     }));
     setFiles((current) => [...current, ...stored]);
-    setNotice(stored.some((file) => file.storageStatus !== "stored") ? "The file is attached for this chat, but R2 storage is not currently available." : "");
+    if (stored.some((file) => file.storageStatus === "stored")) loadWorkspaceFiles();
+    setNotice(stored.some((file) => file.storageStatus !== "stored") ? "The file is attached for this chat, but cloud storage is not currently available." : "");
+  }
+
+  useEffect(() => {
+    if (!chatExecutionLive?.active || !chatExecutionLive.startedAt) return undefined;
+    const timer = window.setInterval(() => setChatExecutionLive((current) => current ? { ...current, elapsed: Math.max(0, Math.round((Date.now() - current.startedAt) / 1000)), phase: current.elapsed < 1 ? "provisioning" : current.elapsed < 4 ? "running" : "finalizing" } : current), 250);
+    return () => window.clearInterval(timer);
+  }, [chatExecutionLive?.active, chatExecutionLive?.startedAt]);
+
+  useEffect(() => {
+    if (!e2bBusy || !e2bStartedAt) return undefined;
+    const timer = window.setInterval(() => setE2bElapsed(Math.max(0, Math.round((Date.now() - e2bStartedAt) / 1000))), 250);
+    return () => window.clearInterval(timer);
+  }, [e2bBusy, e2bStartedAt]);
+
+  async function saveMessageAsFile(message) {
+    try {
+      const response = await fetch("/api/storage/create-text", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: `agent-garden-${new Date().toISOString().slice(0, 10)}.md`, content: message.content }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not save this response.");
+      await loadWorkspaceFiles(); setFilesOpen(true); setNotice("Saved the response to Workspace files.");
+    } catch (error) { setNotice(error.message); }
+  }
+
+  async function deleteWorkspaceFile(file) {
+    try {
+      const response = await fetch("/api/storage/object", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: file.key }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not delete the file.");
+      setWorkspaceFiles((current) => current.filter((item) => item.key !== file.key));
+    } catch (error) { setNotice(error.message); }
   }
 
   async function runInE2B() {
-    setE2bBusy(true);
-    setE2bOutput("");
+    setE2bBusy(true); setE2bPhase("provisioning"); setE2bStartedAt(Date.now()); setE2bElapsed(0); setE2bOutput("");
     try {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      setE2bPhase("running");
       const response = await fetch("/api/e2b/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language: e2bLanguage, code: e2bCode, timeoutMs: 20000 }) });
+      setE2bPhase("finalizing");
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "E2B execution failed.");
       setE2bOutput([data.stdout && `STDOUT\n${data.stdout}`, data.stderr && `STDERR\n${data.stderr}`, `Exit code: ${data.exitCode}`].filter(Boolean).join("\n\n"));
-    } catch (error) { setE2bOutput(`Error: ${error.message}`); }
+      setE2bPhase("complete");
+    } catch (error) { setE2bOutput(`Error: ${error.message}`); setE2bPhase("error"); }
     finally { setE2bBusy(false); }
   }
 
@@ -418,6 +505,8 @@ function App() {
     setFiles([]);
     setSending(true);
     setNotice("");
+    const executionIntent = /\b(run|execute|test|plot|chart|graph|visuali[sz]e)\b[\s\S]{0,80}\b(python|python3|javascript|node|bash|shell|code|script|data|chart|plot)\b/i.test(message) || /```(?:python|py|javascript|js|bash|sh)?/i.test(message);
+    if (executionIntent) setChatExecutionLive({ active: true, phase: "provisioning", elapsed: 0, startedAt: Date.now(), command: "ubuntu@sandbox:~$ python3 /tmp/agent-garden-share/agent-garden-script.py" });
 
     try {
       const result = await fetch("/api/chat", {
@@ -436,6 +525,7 @@ function App() {
       if (!result.ok) throw new Error(data.error || "The provider did not return an answer.");
       if (data.chatId) setChatId(data.chatId);
       if (data.persistenceNotice) setNotice(data.persistenceNotice);
+      if (data.execution) setChatExecutionLive({ ...data.execution, active: false, phase: data.execution.status === "awaiting_code" ? "awaiting_code" : "completed", elapsed: Math.round((data.execution.durationMs || 0) / 1000) });
       setMessages((current) => [...current, {
         id: crypto.randomUUID(),
         role: "assistant",
@@ -443,6 +533,7 @@ function App() {
         provider: data.provider,
         agent: data.agent,
         sources: data.sources || [],
+        execution: data.execution || null,
         fallbackReason: data.fallbackReason,
         researchNotice: data.researchNotice,
         routingReason: data.routingReason,
@@ -475,6 +566,7 @@ function App() {
           </button>
         </div>
         <button className="new-chat" onClick={startNewChat}><MessageSquarePlus size={18} /><span>New chat</span></button>
+        <button className="files-nav-button" onClick={() => { setFilesOpen(true); loadWorkspaceFiles(); }}><Files size={18} />{railOpen && <span>Workspace files</span>}<span className="files-count">{workspaceFiles.length || ""}</span></button>
         {railOpen && <>
           <div className="rail-section-label">Recent</div>
           <button className="recent-chat active"><span className="recent-dot" />Multi-agent workspace<span className="recent-menu"><MoreHorizontal size={16} /></span></button>
@@ -525,15 +617,17 @@ function App() {
                       <span>{message.createdAt}</span>
                     </div>
                     <PreviewText text={message.content} />
+                    {message.execution && <div className={`execution-transcript ${message.execution.status || "completed"}`}><div className="execution-transcript-header"><span className={`execution-status-dot ${message.execution.status || "completed"}`} /><strong>{message.execution.status === "awaiting_code" ? "Waiting for code" : "E2B sandbox transcript"}</strong><span className="execution-runtime">{message.execution.durationMs ? `${(message.execution.durationMs / 1000).toFixed(1)}s` : message.execution.status === "awaiting_code" ? "ready" : "completed"}</span></div>{message.execution.status !== "awaiting_code" && <div className="execution-command"><span>ubuntu@sandbox:~$</span><code>{message.execution.command || `${message.execution.language || "python"} script`}</code></div>}<div className="execution-phase-row"><span>{message.execution.status === "awaiting_code" ? "No process started" : "Provisioned → running → finalized"}</span>{message.execution.exitCode !== null && message.execution.exitCode !== undefined && <span className={message.execution.exitCode === 0 ? "execution-success" : "execution-failure"}>{message.execution.exitCode === 0 ? "Exited 0" : `Exited ${message.execution.exitCode}`}</span>}</div>{message.execution.status !== "awaiting_code" && <pre className="execution-output">{[message.execution.stdout && `STDOUT\n${message.execution.stdout.trim()}`, message.execution.stderr && `STDERR\n${message.execution.stderr.trim()}`].filter(Boolean).join("\n\n") || "(no output)"}</pre>}{message.execution.artifacts?.length > 0 && <div className="execution-artifacts"><strong>Files saved to Workspace</strong>{message.execution.artifacts.map((artifact) => <a key={artifact.key} href={artifact.url} target="_blank" rel="noreferrer"><FileText size={13} />{artifact.name}<span>{Math.max(1, Math.round(artifact.size / 1024))} KB · Download</span></a>)}</div>}</div>}
                     {message.files?.length > 0 && <div className="attached-list">{message.files.map((file) => <span key={file.name}><FileText size={14} />{file.name}</span>)}</div>}
                     {message.fallbackReason && <div className="fallback-note">{message.fallbackReason}</div>}
                     {message.researchNotice && <div className="fallback-note">{message.researchNotice}</div>}
                     {message.routingReason && <div className="routing-note"><Sparkles size={13} />{message.routingReason}</div>}
                     {message.sources?.length > 0 && <div className="sources"><span className="sources-heading"><Link2 size={14} />Sources</span>{message.sources.map((source, index) => <a key={source.uri} href={source.uri} target="_blank" rel="noreferrer"><span>[{index + 1}]</span>{source.title}</a>)}</div>}
+                    {message.role === "assistant" && <div className="message-actions"><button onClick={() => saveMessageAsFile(message)}><Download size={13} />Save as file</button></div>}
                   </div>
                 </article>
               ))}
-              {sending && <article className="message-row assistant"><div className="agent-avatar"><Sparkles size={16} /></div><div className="thinking"><LoaderCircle className="spin" size={17} />{active?.label || "Agent"} is working…</div></article>}
+              {sending && <>{chatExecutionLive?.active && <article className="message-row assistant"><div className="agent-avatar"><Route size={16} /></div><div className="live-terminal"><div className="live-terminal-header"><span className="execution-status-dot running" /><strong>{chatExecutionLive.phase === "provisioning" ? "Provisioning E2B sandbox" : chatExecutionLive.phase === "finalizing" ? "Collecting output and files" : "Running in E2B"}</strong><span>{chatExecutionLive.elapsed || 0}s</span></div><div className="live-terminal-body"><div className="live-terminal-line"><span>ubuntu@sandbox:~$</span> python3 /tmp/agent-garden-share/agent-garden-script.py</div><div className="live-terminal-line muted">{chatExecutionLive.phase === "provisioning" ? "Connecting to isolated Ubuntu sandbox…" : chatExecutionLive.phase === "running" ? "Process is running; stdout will appear when emitted…" : "Finalizing process and collecting generated files…"}</div><span className="terminal-cursor" /></div></div></article>}<article className="message-row assistant"><div className="agent-avatar"><Sparkles size={16} /></div><div className="thinking"><LoaderCircle className="spin" size={17} />{active?.label || "Agent"} is working…</div></article></>}
               <div ref={endRef} />
             </div>
           )}
@@ -584,7 +678,8 @@ function App() {
 
       {config.authRequired && !user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Secure workspace access</span><h2>{authMode === "signup" ? "Create your Agent Garden account" : "Welcome back to Agent Garden"}</h2><p>Sign in with email and password, or use Google when available. Your chats and personalization settings are stored securely in your account.</p><div className="auth-tabs"><button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button><button className={authMode === "signup" ? "active" : ""} onClick={() => setAuthMode("signup")}>Create account</button></div><form className="account-form" onSubmit={submitAccount}>{authMode === "signup" && <label>Name<input value={accountForm.name} onChange={(event) => setAccountForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your name" autoComplete="name" /></label>}<label>Email<input type="email" required value={accountForm.email} onChange={(event) => setAccountForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" autoComplete="email" /></label><label>Password<input type="password" required minLength={8} value={accountForm.password} onChange={(event) => setAccountForm((current) => ({ ...current, password: event.target.value }))} placeholder="At least 8 characters" autoComplete={authMode === "signup" ? "new-password" : "current-password"} /></label><button className="firebase-button" type="submit" disabled={accountBusy}>{accountBusy ? <LoaderCircle className="spin" size={18} /> : <ShieldCheck size={18} />}<span>{authMode === "signup" ? "Create account" : "Sign in with email"}</span></button></form>{config.firebaseConfig?.apiKey && <button className="secondary-auth-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={17} />{signingIn ? "Connecting…" : "Continue with Google"}</button>}{notice && <div className="notice error">{notice}</div>}<small>Do not use passwords or notes containing secrets. You control whether onboarding answers are used for AI personalization.</small></div></div>}
       {onboardingOpen && user && <div className="auth-overlay onboarding-overlay"><div className="onboarding-card"><div className="onboarding-header"><div><span className="eyebrow">Personalization setup</span><h2>Build your AI profile</h2><p>Answer at your own pace. You can change or delete this information later.</p></div><span className="onboarding-progress">{onboardingSection + 1} / {ONBOARDING_SECTIONS.length}</span></div><div className="onboarding-steps">{ONBOARDING_SECTIONS.map((section, index) => <button key={section.id} className={index === onboardingSection ? "active" : index < onboardingSection ? "complete" : ""} onClick={() => setOnboardingSection(index)}>{index + 1}. {section.title}</button>)}</div>{(() => { const section = ONBOARDING_SECTIONS[onboardingSection]; return <div className="onboarding-body"><h3>{section.title}</h3><p>{section.description}</p><div className="onboarding-questions">{section.questions.map((question) => { const key = `${section.id}.${question.key}`; return <label key={key}>{question.label}<textarea rows={2} value={onboardingAnswers[key] || ""} onChange={(event) => setOnboardingAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder={question.placeholder} /></label>; })}</div><label className="memory-toggle"><input type="checkbox" checked={Boolean(aiMemoryEnabled)} onChange={(event) => setAiMemoryEnabled(event.target.checked)} /><span><strong>Allow AI personalization</strong><small>Use included answers to make future agent responses more relevant.</small></span></label><label className="memory-toggle section-memory"><input type="checkbox" checked={Boolean(sectionMemory[section.id])} disabled={!aiMemoryEnabled} onChange={(event) => setSectionMemory((current) => ({ ...current, [section.id]: event.target.checked }))} /><span><strong>Include this section in AI memory</strong><small>This section stays saved to your profile, but can be excluded from prompts.</small></span></label><div className="onboarding-actions"><button className="secondary-auth-button" onClick={() => setOnboardingSection((current) => Math.max(0, current - 1))} disabled={onboardingSection === 0}>Back</button>{onboardingSection < ONBOARDING_SECTIONS.length - 1 ? <button className="firebase-button" onClick={() => setOnboardingSection((current) => current + 1)}>Continue</button> : <button className="firebase-button" onClick={saveOnboarding} disabled={accountBusy}>{accountBusy ? "Saving…" : "Save profile"}</button>}</div></div>; })()}</div></div>}
-      {e2bOpen && user && <div className="auth-overlay"><div className="e2b-card"><div className="onboarding-header"><div><span className="eyebrow">E2B secure sandbox</span><h2>Run code safely</h2><p>Execute a short script in an isolated cloud environment and inspect the output.</p></div><button className="icon-button" onClick={() => setE2bOpen(false)}><X size={18} /></button></div><div className="e2b-toolbar"><select value={e2bLanguage} onChange={(event) => setE2bLanguage(event.target.value)}><option value="python">Python</option><option value="javascript">JavaScript</option><option value="bash">Bash</option></select><button className="firebase-button" onClick={runInE2B} disabled={e2bBusy}>{e2bBusy ? <LoaderCircle className="spin" size={16} /> : <Route size={16} />} {e2bBusy ? "Running…" : "Run in E2B"}</button></div><textarea className="e2b-editor" value={e2bCode} onChange={(event) => setE2bCode(event.target.value)} spellCheck="false" />{e2bOutput && <pre className="e2b-output">{e2bOutput}</pre>}</div></div>}
+      {e2bOpen && user && <div className="auth-overlay"><div className="e2b-card"><div className="onboarding-header"><div><span className="eyebrow">E2B secure sandbox</span><h2>Run code safely</h2><p>Execute a short script in an isolated cloud environment and inspect the live execution state.</p></div><button className="icon-button" onClick={() => setE2bOpen(false)}><X size={18} /></button></div><div className="e2b-toolbar"><select value={e2bLanguage} onChange={(event) => setE2bLanguage(event.target.value)}><option value="python">Python</option><option value="javascript">JavaScript</option><option value="bash">Bash</option></select><button className="firebase-button" onClick={runInE2B} disabled={e2bBusy}>{e2bBusy ? <LoaderCircle className="spin" size={16} /> : <Route size={16} />} {e2bBusy ? "Running…" : "Run in E2B"}</button></div><div className="e2b-live-bar"><span className={`e2b-live-dot ${e2bPhase}`} /><strong>{e2bPhase === "idle" ? "Sandbox ready" : e2bPhase === "provisioning" ? "Provisioning sandbox" : e2bPhase === "running" ? "Code is running" : e2bPhase === "finalizing" ? "Collecting output" : e2bPhase === "complete" ? "Execution complete" : "Execution needs attention"}</strong><span className="e2b-clock">{e2bElapsed}s</span></div><div className="e2b-preview-label">Live code preview · {e2bLanguage}</div><textarea className="e2b-editor" value={e2bCode} onChange={(event) => setE2bCode(event.target.value)} spellCheck="false" />{e2bBusy && <div className="e2b-stream"><span className="terminal-cursor" />E2B sandbox is active · waiting for process output…</div>}{e2bOutput && <pre className="e2b-output">{e2bOutput}</pre>}</div></div>}
+      {filesOpen && user && <div className="files-overlay"><section className="files-panel"><header className="files-panel-header"><div><span className="eyebrow">Workspace storage</span><h2>Files</h2><p>Uploaded attachments and responses you saved for download.</p></div><div className="files-panel-actions"><button className="icon-button" onClick={loadWorkspaceFiles} title="Refresh files"><RefreshCw className={filesLoading ? "spin" : ""} size={17} /></button><button className="icon-button" onClick={() => setFilesOpen(false)} title="Close files"><X size={18} /></button></div></header>{filesLoading && <div className="files-empty"><LoaderCircle className="spin" size={18} />Loading workspace files…</div>}{!filesLoading && workspaceFiles.length === 0 && <div className="files-empty"><Files size={28} /><strong>No workspace files yet</strong><span>Upload an attachment or save an assistant response to see it here.</span></div>}{!filesLoading && workspaceFiles.length > 0 && <div className="files-list">{workspaceFiles.map((file) => <article className="workspace-file" key={file.key}><div className="workspace-file-icon"><FileText size={18} /></div><div className="workspace-file-info"><strong>{file.name}</strong><small>{file.size ? `${Math.max(1, Math.round(file.size / 1024))} KB` : "Empty"} · {file.lastModified ? new Date(file.lastModified).toLocaleDateString() : "Workspace file"}</small></div><div className="workspace-file-actions"><a href={file.url} target="_blank" rel="noreferrer" title="Download file"><Download size={16} /></a><button onClick={() => deleteWorkspaceFile(file)} title="Delete file"><Trash2 size={16} /></button></div></article>)}</div>}</section></div>}
       {notice && user && <div className="notice toast error"><button onClick={() => setNotice("")}><X size={14} /></button>{notice}</div>}
     </div>
   );

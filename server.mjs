@@ -2,7 +2,7 @@ import "dotenv/config";
 import path from "node:path";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { Sandbox } from "e2b";
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -38,7 +38,7 @@ const MAX_REQUESTS_PER_WINDOW = 8;
 const STORAGE_BUCKET = process.env.B2_BUCKET_NAME || process.env.STORAGE_BUCKET_NAME;
 const STORAGE_ENDPOINT = process.env.B2_S3_ENDPOINT || process.env.STORAGE_ENDPOINT;
 const STORAGE_READY = Boolean(STORAGE_BUCKET && STORAGE_ENDPOINT && process.env.B2_KEY_ID && process.env.B2_APPLICATION_KEY);
-const storage = STORAGE_READY ? new S3Client({ region: process.env.B2_REGION || "us-east-005", endpoint: STORAGE_ENDPOINT, forcePathStyle: true, credentials: { accessKeyId: process.env.B2_KEY_ID, secretAccessKey: process.env.B2_APPLICATION_KEY } }) : null;
+const storage = STORAGE_READY ? new S3Client({ region: process.env.B2_REGION || "us-east-005", endpoint: STORAGE_ENDPOINT, credentials: { accessKeyId: process.env.B2_KEY_ID, secretAccessKey: process.env.B2_APPLICATION_KEY } }) : null;
 const E2B_READY = Boolean(process.env.E2B_API_KEY);
 const MAX_STORAGE_FILE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "application/pdf", "application/json", "text/csv", "text/javascript", "application/javascript", "application/typescript", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -62,6 +62,39 @@ async function d1Request(pathname, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `D1 Worker returned ${response.status}.`);
   return data;
+}
+
+async function d1RequestWithRetry(pathname, options = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { return await d1Request(pathname, options); }
+    catch (error) { lastError = error; if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250)); }
+  }
+  throw lastError;
+}
+
+async function indexWorkspaceArtifacts(userId, artifacts, content = "Workspace artifact") {
+  const normalized = (Array.isArray(artifacts) ? artifacts : []).filter((artifact) => artifact?.key).map((artifact) => ({
+    name: safeObjectName(artifact.name || path.basename(artifact.key)),
+    key: String(artifact.key),
+    size: Number(artifact.size || 0),
+    contentType: artifact.contentType || artifact.mimeType || artifact.content_type || artifact.type || "application/octet-stream",
+  }));
+  if (!normalized.length) return;
+  const chatId = `workspace_files_${String(userId)}`;
+  await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: String(userId), title: "Workspace files", agentId: "storage", provider: "B2" }) });
+  await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `file_index_${randomBytes(12).toString("hex")}`, chatId, userId: String(userId), role: "assistant", content: String(content).slice(0, 500), agentId: "storage", provider: "B2", metadata: { artifacts: normalized } }) });
+}
+
+async function signedWorkspaceFiles(artifacts) {
+  return Promise.all((Array.isArray(artifacts) ? artifacts : []).filter((artifact) => artifact?.key).map(async (artifact) => ({
+    ...artifact,
+    key: String(artifact.key),
+    name: safeObjectName(artifact.name || path.basename(String(artifact.key))),
+    size: Number(artifact.size || 0),
+    url: await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: String(artifact.key) }), { expiresIn: 900 }),
+    expiresIn: 900,
+  })));
 }
 
 function hashPassword(password, saltHex) {
@@ -102,7 +135,7 @@ const AGENTS = {
     icon: "Sparkles",
     description: "Breaks a request into the smallest useful specialist steps.",
     provider: "Gemini",
-    prompt: "You are the coordinator of a careful multi-agent workspace. Decide the most useful next action and give the user a direct, structured answer. If a task needs research, coding, or file analysis, state what that specialist would focus on. Do not pretend you executed tools you did not execute.",
+    prompt: "You are the coordinator of a careful multi-agent workspace. For substantive requests, decide the most useful next action and give the user a direct, structured answer. For greetings, small talk, or ordinary conversation, respond warmly and naturally without launching an intake questionnaire, assigning roles, or asking project-discovery questions. Do not pretend you executed tools you did not execute.",
   },
   researcher: {
     label: "Researcher",
@@ -177,7 +210,13 @@ function routeRequest(message, files) {
   }
   const text = String(message || "").toLowerCase();
   if (/^(hi|hello|hey|yo|sup|what's up|how are you|thanks|thank you|good morning|good evening)[!.?, ]*$/i.test(String(message || "").trim())) {
-    return { id: "coordinator", reason: "This looks like casual conversation, so Coordinator will answer naturally." };
+    return { id: "coordinator", casual: true, reason: "This is casual conversation, so the workspace will answer naturally without starting a project intake." };
+  }
+  if (/\b(pie chart|bar chart|line chart|scatter plot|plot|graph|visuali[sz]e|data visualization)\b/i.test(String(message || ""))) {
+    return { id: "coder", execute: true, generateCode: true, reason: "A visualization request was detected, so Agent Garden will generate and run code in the E2B sandbox." };
+  }
+  if (/```(?:python|py|javascript|js|bash|sh)?\s*[\s\S]*```/i.test(String(message || "")) || /\b(run|execute|test)\b[\s\S]{0,40}\b(python|python3|javascript|node|bash|shell|code|script)\b/i.test(String(message || ""))) {
+    return { id: "coder", execute: true, reason: "A code-execution request was detected, so the request will run in the E2B sandbox." };
   }
   if (/https?:\/\/\S+/.test(text) && /\b(debug|broken|error|issue|bug|not working|fails|failure|console|website|site)\b/.test(text)) {
     return { id: "debugger", reason: "A website URL and troubleshooting language were detected, so Debugger was selected." };
@@ -229,9 +268,9 @@ async function fetchPublicPage(url) {
 function resolveAgent(requestedId, message, files) {
   if (requestedId === "auto" || !AGENTS[requestedId]) {
     const route = routeRequest(message, files);
-    return { agent: { id: route.id, ...AGENTS[route.id] }, routingReason: route.reason };
+    return { agent: { id: route.id, ...AGENTS[route.id], ...(route.casual ? { prompt: "You are a warm, natural conversational assistant inside a multi-agent workspace. Respond directly to the user’s greeting or small talk. Do not ask onboarding questions, do not assign specialists, and do not turn a simple exchange into a project intake. If the user later asks for substantive work, help them transition naturally." } : {}) }, routingReason: route.reason, execute: Boolean(route.execute), generateCode: Boolean(route.generateCode) };
   }
-  return { agent: { id: requestedId, ...AGENTS[requestedId] }, routingReason: "Selected manually by the user." };
+  return { agent: { id: requestedId, ...AGENTS[requestedId] }, routingReason: "Selected manually by the user.", execute: false, generateCode: false };
 }
 
 app.set("trust proxy", 1);
@@ -345,6 +384,82 @@ function citationsFrom(response) {
     .filter((web) => web?.uri && web?.title)
     .slice(0, 6)
     .map((web) => ({ title: web.title, uri: web.uri }));
+}
+
+function extractExecutionRequest(message) {
+  const raw = String(message || "");
+  const fenced = raw.match(/```\s*(python3?|py|javascript|js|node|bash|sh)?\s*\n?([\s\S]*?)```/i);
+  if (fenced) return { language: (fenced[1] || "python").toLowerCase(), code: fenced[2].trim() };
+  const languageMatch = raw.match(/\b(python3?|py|javascript|js|node|bash|sh)\b/i);
+  const language = (languageMatch?.[1] || "python").toLowerCase();
+  const afterColon = raw.match(/^[^:]+:\s*([\s\S]+)$/)?.[1]?.trim() || "";
+  const runMatch = raw.match(/\b(?:run|execute|test)\s+(?:this\s+)?(?:python|python3|javascript|js|node|bash|shell|code|script)\b\s*([\s\S]+)/i);
+  const code = afterColon || runMatch?.[1]?.trim() || "";
+  return { language, code };
+}
+
+async function generateExecutionCode({ message, history }) {
+  if (!gemini) throw new Error("Gemini is not configured to generate execution code.");
+  const response = await gemini.models.generateContent({
+    model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
+    contents: [{ role: "user", parts: [{ text: `Write a complete Python 3 script for this user request: ${message}\\n\\nReturn only executable Python code, with no Markdown fences or explanation. The script must save any generated visual or data artifact to the /tmp/agent-garden-share directory and print the exact output filename. For charts, prefer a self-contained SVG or CSV using the Python standard library; do not assume third-party packages such as matplotlib are installed. Do not access secrets, the network, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
+    config: { systemInstruction: "You generate safe, self-contained Python scripts for an isolated sandbox. Return code only.", temperature: 0.15, maxOutputTokens: 5000 },
+  });
+  const raw = response.text?.trim() || "";
+  const fenced = raw.match(/```(?:python|py)?\\s*([\\s\\S]*?)```/i);
+  return (fenced ? fenced[1] : raw).trim();
+}
+
+function artifactContentType(name) {
+  const extension = String(name).toLowerCase().split(".").pop();
+  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", pdf: "application/pdf", csv: "text/csv", json: "application/json", txt: "text/plain", md: "text/markdown", html: "text/html", css: "text/css", js: "text/javascript", py: "text/x-python" })[extension] || "application/octet-stream";
+}
+
+async function collectE2BArtifacts({ sandbox, userId, codePath }) {
+  if (!storage || !STORAGE_READY) return [];
+  const scan = await sandbox.commands.run(`find /tmp/agent-garden-share -type f -mmin -5 -size -10M ! -path '${codePath}' 2>/dev/null | head -20`, { timeoutMs: 10000 });
+  const paths = String(scan.stdout || "").split("\\n").map((value) => value.trim()).filter((value) => value && value !== codePath && !value.endsWith(".py") && !value.endsWith(".js") && !value.endsWith(".sh"));
+  const artifacts = [];
+  for (const artifactPath of paths.slice(0, 8)) {
+    const name = safeObjectName(path.basename(artifactPath));
+    const quotedPath = "'" + artifactPath.replaceAll("'", "'\\\\''") + "'";
+    const encoded = await sandbox.commands.run(`base64 -w0 -- ${quotedPath}`, { timeoutMs: 15000 });
+    const body = Buffer.from(String(encoded.stdout || "").trim(), "base64");
+    if (!body.length || body.length > 10 * 1024 * 1024) continue;
+    const key = `users/${encodeURIComponent(userId)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
+    await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: artifactContentType(name), ContentDisposition: `attachment; filename="${name}"` }));
+    const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 });
+    artifacts.push({ name, key, size: body.length, contentType: artifactContentType(name), url, expiresIn: 900 });
+  }
+  return artifacts;
+}
+
+async function executeInE2B({ language, code, timeoutMs = 20000, userId }) {
+  if (!E2B_READY) throw new Error("E2B execution is not configured on the server yet.");
+  const normalized = String(language || "python").toLowerCase();
+  const allowedLanguages = new Set(["python", "python3", "py", "javascript", "js", "node", "bash", "sh"]);
+  if (!allowedLanguages.has(normalized)) throw new Error("Supported E2B languages are Python, JavaScript, and Bash.");
+  if (!code || String(code).length > 30000) throw new Error("Code must be between 1 and 30,000 characters.");
+  const safeTimeout = Math.min(Math.max(Number(timeoutMs || 20000), 1000), 300000);
+  const startedAt = Date.now();
+  let sandbox;
+  try {
+    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 300000 });
+    const extension = normalized.startsWith("python") || normalized === "py" ? "py" : normalized === "bash" || normalized === "sh" ? "sh" : "js";
+    const codePath = `/tmp/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
+    await sandbox.files.write(codePath, String(code));
+    const command = extension === "py" ? `mkdir -p /tmp/agent-garden-share && cd /tmp/agent-garden-share && python3 ${codePath}` : extension === "sh" ? `mkdir -p /tmp/agent-garden-share && cd /tmp/agent-garden-share && bash ${codePath}` : `mkdir -p /tmp/agent-garden-share && cd /tmp/agent-garden-share && node ${codePath}`;
+    let execution;
+    try {
+      execution = await sandbox.commands.run(command, { timeoutMs: safeTimeout });
+    } catch (commandError) {
+      execution = { stdout: commandError.stdout || "", stderr: commandError.stderr || commandError.message || "Process exited with an error.", exitCode: commandError.exitCode ?? 1 };
+    }
+    let artifacts = [];
+    let artifactNotice = "";
+    try { artifacts = await collectE2BArtifacts({ sandbox, userId, codePath }); } catch (artifactError) { artifactNotice = `The code ran, but generated files could not be saved: ${artifactError.message}`; }
+    return { language: normalized, code: String(code), command, stdout: execution.stdout || "", stderr: execution.stderr || "", exitCode: execution.exitCode ?? 0, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", artifacts, artifactNotice };
+  } finally { try { await sandbox?.kill(); } catch {} }
 }
 
 async function callGemini({ agent, message, history, files }) {
@@ -490,13 +605,26 @@ app.post("/api/auth/password/login", async (req, res) => {
 });
 
 app.get("/api/profile", requireUser, async (req, res) => {
-  try { const profile = await d1Request(`/v1/users/${encodeURIComponent(req.user.sub)}`); const onboarding = await d1Request(`/v1/onboarding/${encodeURIComponent(req.user.sub)}`); res.json({ user: profile?.user || req.user, answers: onboarding?.answers || [] }); }
-  catch (error) { res.status(502).json({ error: error.message }); }
+  try {
+    const profile = await d1Request(`/v1/users/${encodeURIComponent(req.user.sub)}`);
+    const onboarding = await d1Request(`/v1/onboarding/${encodeURIComponent(req.user.sub)}`);
+    const raw = profile?.user || {};
+    const user = {
+      ...req.user,
+      ...raw,
+      onboardingComplete: Boolean(raw.onboarding_complete ?? raw.onboardingComplete ?? req.user.onboardingComplete),
+      aiMemoryEnabled: Boolean(raw.ai_memory_enabled ?? raw.aiMemoryEnabled ?? req.user.aiMemoryEnabled),
+    };
+    res.json({ user, answers: onboarding?.answers || [] });
+  } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+
 app.post("/api/profile/onboarding", requireUser, async (req, res) => {
-  try { const data = await d1Request("/v1/onboarding/save", { method: "POST", body: JSON.stringify({ ...req.body, userId: req.user.sub }) }); res.json(data || { ok: false }); }
-  catch (error) { res.status(502).json({ error: error.message }); }
+  try {
+    const data = await d1Request("/v1/onboarding/save", { method: "POST", body: JSON.stringify({ ...req.body, userId: req.user.sub, onboardingComplete: req.body?.completed !== false }) });
+    res.json({ ...(data || {}), ok: data?.ok !== false, onboardingComplete: true, aiMemoryEnabled: Boolean(req.body?.aiMemoryEnabled) });
+  } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
 app.post("/api/storage/presign", requireUser, async (req, res) => {
@@ -513,6 +641,20 @@ app.post("/api/storage/presign", requireUser, async (req, res) => {
   } catch (error) { res.status(502).json({ error: error.message || "Could not create an storage upload URL." }); }
 });
 
+app.post("/api/storage/create-text", requireUser, async (req, res) => {
+  if (!requireStorage(res)) return;
+  const name = safeObjectName(req.body?.name || `agent-garden-${Date.now()}.md`);
+  const content = String(req.body?.content || "");
+  if (!content || Buffer.byteLength(content, "utf8") > MAX_STORAGE_FILE_BYTES) return res.status(400).json({ error: "Generated file content is empty or too large." });
+  const key = `users/${encodeURIComponent(req.user.sub)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
+  try {
+    const size = Buffer.byteLength(content, "utf8");
+    await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: Buffer.from(content, "utf8"), ContentType: "text/markdown; charset=utf-8" }));
+    try { await indexWorkspaceArtifacts(req.user.sub, [{ name, key, size, contentType: "text/markdown" }], "Saved assistant response"); } catch (error) { console.warn("D1 file index unavailable:", error.message); }
+    res.json({ ok: true, key, name, size, contentType: "text/markdown" });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not save the generated workspace file." }); }
+});
+
 app.post("/api/storage/upload", requireUser, async (req, res) => {
   if (!requireStorage(res)) return;
   const name = safeObjectName(req.body?.name);
@@ -523,8 +665,30 @@ app.post("/api/storage/upload", requireUser, async (req, res) => {
   const body = Buffer.from(raw, "base64");
   if (!body.length || body.length > MAX_STORAGE_FILE_BYTES) return res.status(400).json({ error: "Files must be between 1 byte and 25 MB." });
   const key = `users/${encodeURIComponent(req.user.sub)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
-  try { await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: contentType })); res.json({ ok: true, key, size: body.length, contentType }); }
-  catch (error) { res.status(502).json({ error: error.message || "Could not upload the file to Backblaze B2." }); }
+  try {
+    await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: contentType }));
+    try { await indexWorkspaceArtifacts(req.user.sub, [{ name, key, size: body.length, contentType }], "Uploaded workspace file"); } catch (error) { console.warn("D1 file index unavailable:", error.message); }
+    res.json({ ok: true, key, name, size: body.length, contentType });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not upload the file to Backblaze B2." }); }
+});
+
+app.get("/api/storage/files", requireUser, async (req, res) => {
+  if (!requireStorage(res)) return;
+  const prefix = `users/${encodeURIComponent(req.user.sub)}/`;
+  try {
+    try {
+      const indexed = await d1Request(`/v1/files/${encodeURIComponent(req.user.sub)}`);
+      if (Array.isArray(indexed?.files)) return res.json({ files: await signedWorkspaceFiles(indexed.files), source: "d1-index" });
+    } catch (error) { console.warn("D1 file index read unavailable; falling back to B2 listing:", error.message); }
+    const listed = await storage.send(new ListObjectsV2Command({ Bucket: STORAGE_BUCKET, Prefix: prefix, MaxKeys: 100 }));
+    const files = await Promise.all((listed.Contents || []).filter((item) => item.Key).map(async (item) => {
+      const key = item.Key;
+      const name = key.slice(key.lastIndexOf("-") + 1) || "workspace-file";
+      const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 });
+      return { key, name, size: Number(item.Size || 0), lastModified: item.LastModified || null, url, expiresIn: 900 };
+    }));
+    res.json({ files });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not list workspace files." }); }
 });
 
 app.post("/api/storage/download-url", requireUser, async (req, res) => {
@@ -544,24 +708,8 @@ app.delete("/api/storage/object", requireUser, async (req, res) => {
 });
 
 app.post("/api/e2b/run", requireUser, userRateLimit, async (req, res) => {
-  if (!E2B_READY) return res.status(503).json({ error: "E2B execution is not configured on the server yet." });
-  const language = String(req.body?.language || "python").toLowerCase();
-  const code = String(req.body?.code || "");
-  const allowedLanguages = new Set(["python", "python3", "javascript", "js", "bash", "sh"]);
-  if (!allowedLanguages.has(language)) return res.status(400).json({ error: "Supported E2B languages are Python, JavaScript, and Bash." });
-  if (!code || code.length > 30000) return res.status(400).json({ error: "Code must be between 1 and 30,000 characters." });
-  const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs || 20000), 1000), 300000);
-  let sandbox;
-  try {
-    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 300000 });
-    const extension = language.startsWith("python") ? "py" : language === "bash" || language === "sh" ? "sh" : "js";
-    const codePath = `/tmp/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
-    await sandbox.files.write(codePath, code);
-    const command = extension === "py" ? `python3 ${codePath}` : extension === "sh" ? `bash ${codePath}` : `node ${codePath}`;
-    const execution = await sandbox.commands.run(command, { timeoutMs });
-    res.json({ ok: true, stdout: execution.stdout || "", stderr: execution.stderr || "", exitCode: execution.exitCode ?? 0, sandbox: "e2b" });
-  } catch (error) { res.status(502).json({ error: error.message || "E2B execution failed." }); }
-  finally { try { await sandbox?.kill(); } catch {} }
+  try { res.json({ ok: true, ...(await executeInE2B({ language: req.body?.language, code: req.body?.code, timeoutMs: req.body?.timeoutMs, userId: req.user.sub })) }); }
+  catch (error) { res.status(502).json({ error: error.message || "E2B execution failed." }); }
 });
 
 app.get("/api/auth/me", (req, res) => {
@@ -578,7 +726,7 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
   const requestedAgentId = typeof req.body?.agentId === "string" ? req.body.agentId : "auto";
   const requestedProvider = req.body?.provider === "pollinations" ? "pollinations" : "gemini";
   const files = Array.isArray(req.body?.files) ? req.body.files : [];
-  const { agent, routingReason } = resolveAgent(requestedAgentId, message, files);
+  const { agent, routingReason, execute, generateCode } = resolveAgent(requestedAgentId, message, files);
   if (!message && !files.length) return res.status(400).json({ error: "Write a message or attach a file first." });
   if (message.length > 12000) return res.status(400).json({ error: "Please keep messages under 12,000 characters." });
   let enrichedMessage = message;
@@ -597,7 +745,19 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
 
   try {
     let result;
-    if (requestedProvider === "pollinations") {
+    if (execute) {
+      const request = extractExecutionRequest(message);
+      if (generateCode) request.code = await generateExecutionCode({ message, history: req.body?.history });
+      if (!request.code) {
+        result = { answer: `## Ready to run\n\nI detected a ${request.language} execution request, but no code was included. Paste the code in a fenced block or write it after a colon, for example:\n\n\`\`\`${request.language}\nprint(2 + 3)\n\`\`\``, provider: "E2B", sources: [], execution: { status: "awaiting_code", language: request.language, code: "", stdout: "", stderr: "", exitCode: null, sandbox: "e2b", artifacts: [] } };
+      } else {
+        const execution = await executeInE2B({ ...request, userId: req.user.sub });
+        const output = [execution.stdout && `STDOUT\n${execution.stdout.trim()}`, execution.stderr && `STDERR\n${execution.stderr.trim()}`, `Exit code: ${execution.exitCode}`].filter(Boolean).join("\n\n");
+        const fence = "```";
+        const artifactText = execution.artifacts?.length ? `\n\n### Saved files\n\n${execution.artifacts.map((artifact) => `- [${artifact.name}](${artifact.url}) — ${(artifact.size / 1024).toFixed(1)} KB, saved to Workspace files`).join("\n")}` : execution.artifactNotice ? `\n\n> ${execution.artifactNotice}` : "";
+        result = { answer: `## E2B execution\n\nI ran the ${execution.language} code in the Agent Garden sandbox.\n\n${fence}${execution.language}\n${execution.code}\n${fence}\n\n### Output\n\n${fence}text\n${output || "(no output)"}\n${fence}${artifactText}`, provider: "E2B", sources: [], execution };
+      }
+    } else if (requestedProvider === "pollinations") {
       result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files });
     } else {
       try {
@@ -609,16 +769,21 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
       }
     }
     const responsePayload = { ...result, agent: agent.id, routingReason, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
+    const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
+    responsePayload.chatId = chatId;
     try {
-      const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
-      await d1Request("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: req.user.sub, title: message.slice(0, 80) || "New chat", agentId: agent.id, provider: result.provider }) });
-      await d1Request("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "user", content: message, agentId: agent.id, provider: requestedProvider, metadata: { files: files.map((file) => ({ name: file.name, storageKey: file.storageKey || null, size: file.size || null, mimeType: file.mimeType || null })) } }) });
-      await d1Request("/v1/messages", {
+      await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: req.user.sub, title: message.slice(0, 80) || "New chat", agentId: agent.id, provider: result.provider }) });
+      await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "user", content: message, agentId: agent.id, provider: requestedProvider, metadata: { files: files.map((file) => ({ name: file.name, storageKey: file.storageKey || null, size: file.size || null, mimeType: file.mimeType || null })) } }) });
+      await d1RequestWithRetry("/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "assistant", content: result.answer, agentId: agent.id, provider: result.provider, metadata: { sources: result.sources || [] } }),
+        body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "assistant", content: result.answer, agentId: agent.id, provider: result.provider, metadata: { sources: result.sources || [], artifacts: result.execution?.artifacts || result.artifacts || [] } }),
       });
-      responsePayload.chatId = chatId;
-    } catch (persistError) { responsePayload.persistenceNotice = "The reply completed, but chat persistence was temporarily unavailable."; }
+      responsePayload.persistenceStatus = "saved";
+    } catch (persistError) {
+      console.warn("Chat persistence unavailable:", persistError.message);
+      responsePayload.persistenceStatus = "unavailable";
+      responsePayload.persistenceNotice = "The reply completed, but the database could not save this turn. The chat ID was preserved so it can be retried on the next message.";
+    }
     res.json(responsePayload);
   } catch (error) {
     res.status(502).json({ error: error.message || "The selected provider could not complete the request." });
