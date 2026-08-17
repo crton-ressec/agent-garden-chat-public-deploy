@@ -127,6 +127,11 @@ function App() {
   const [sectionMemory, setSectionMemory] = useState(Object.fromEntries(ONBOARDING_SECTIONS.map((section) => [section.id, true])));
   const [profileLoading, setProfileLoading] = useState(false);
   const [chatId, setChatId] = useState(null);
+  const [e2bOpen, setE2bOpen] = useState(false);
+  const [e2bLanguage, setE2bLanguage] = useState("python");
+  const [e2bCode, setE2bCode] = useState("print('Hello from Agent Garden')");
+  const [e2bOutput, setE2bOutput] = useState("");
+  const [e2bBusy, setE2bBusy] = useState(false);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const endRef = useRef(null);
@@ -368,8 +373,28 @@ function App() {
       reader.onerror = reject;
       reader.readAsDataURL(file);
     })));
-    setFiles((current) => [...current, ...converted]);
-    setNotice("");
+    const stored = await Promise.all(converted.map(async (file) => {
+      try {
+        const uploadResponse = await fetch("/api/storage/upload", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: file.name, contentType: file.mimeType, data: file.data }) });
+        const uploadData = await uploadResponse.json().catch(() => ({}));
+        if (!uploadResponse.ok) return file;
+        return { ...file, storageKey: uploadData.key, storageStatus: "stored" };
+      } catch { return file; }
+    }));
+    setFiles((current) => [...current, ...stored]);
+    setNotice(stored.some((file) => file.storageStatus !== "stored") ? "The file is attached for this chat, but R2 storage is not currently available." : "");
+  }
+
+  async function runInE2B() {
+    setE2bBusy(true);
+    setE2bOutput("");
+    try {
+      const response = await fetch("/api/e2b/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language: e2bLanguage, code: e2bCode, timeoutMs: 20000 }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "E2B execution failed.");
+      setE2bOutput([data.stdout && `STDOUT\n${data.stdout}`, data.stderr && `STDERR\n${data.stderr}`, `Exit code: ${data.exitCode}`].filter(Boolean).join("\n\n"));
+    } catch (error) { setE2bOutput(`Error: ${error.message}`); }
+    finally { setE2bBusy(false); }
   }
 
   async function sendMessage(forcedPrompt) {
@@ -531,7 +556,7 @@ function App() {
                 <div className="composer-tools">
                   <input ref={fileInputRef} className="hidden-input" type="file" multiple onChange={handleFiles} accept=".txt,.md,.pdf,.doc,.docx,.csv,.json,.js,.jsx,.ts,.tsx,.py,.html,.css,image/*" />
                   <button className="tool-button" onClick={() => fileInputRef.current?.click()} disabled={!user || sending} title="Add files"><Paperclip size={18} /></button>
-                  <button className="tool-button" disabled title="Mention an agent"><AtSign size={18} /></button>
+                  <button className="tool-button" onClick={() => setE2bOpen(true)} disabled={!user || sending} title="Run code in E2B"><Route size={18} /></button>
                   <div className="provider-select"><span className={`status-dot ${provider}`} /><select value={provider} onChange={(event) => setProvider(event.target.value)} disabled={!user || sending}><option value="gemini">Gemini (automatic fallback)</option><option value="pollinations">Pollinations only</option></select></div>
                 </div>
                 <button className={`send-button ${input.trim() || files.length ? "ready" : ""}`} onClick={() => sendMessage()} disabled={!user || sending || (!input.trim() && !files.length)} aria-label="Send message">{sending ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}</button>
@@ -559,6 +584,7 @@ function App() {
 
       {config.authRequired && !user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Secure workspace access</span><h2>{authMode === "signup" ? "Create your Agent Garden account" : "Welcome back to Agent Garden"}</h2><p>Sign in with email and password, or use Google when available. Your chats and personalization settings are stored securely in your account.</p><div className="auth-tabs"><button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button><button className={authMode === "signup" ? "active" : ""} onClick={() => setAuthMode("signup")}>Create account</button></div><form className="account-form" onSubmit={submitAccount}>{authMode === "signup" && <label>Name<input value={accountForm.name} onChange={(event) => setAccountForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your name" autoComplete="name" /></label>}<label>Email<input type="email" required value={accountForm.email} onChange={(event) => setAccountForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" autoComplete="email" /></label><label>Password<input type="password" required minLength={8} value={accountForm.password} onChange={(event) => setAccountForm((current) => ({ ...current, password: event.target.value }))} placeholder="At least 8 characters" autoComplete={authMode === "signup" ? "new-password" : "current-password"} /></label><button className="firebase-button" type="submit" disabled={accountBusy}>{accountBusy ? <LoaderCircle className="spin" size={18} /> : <ShieldCheck size={18} />}<span>{authMode === "signup" ? "Create account" : "Sign in with email"}</span></button></form>{config.firebaseConfig?.apiKey && <button className="secondary-auth-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={17} />{signingIn ? "Connecting…" : "Continue with Google"}</button>}{notice && <div className="notice error">{notice}</div>}<small>Do not use passwords or notes containing secrets. You control whether onboarding answers are used for AI personalization.</small></div></div>}
       {onboardingOpen && user && <div className="auth-overlay onboarding-overlay"><div className="onboarding-card"><div className="onboarding-header"><div><span className="eyebrow">Personalization setup</span><h2>Build your AI profile</h2><p>Answer at your own pace. You can change or delete this information later.</p></div><span className="onboarding-progress">{onboardingSection + 1} / {ONBOARDING_SECTIONS.length}</span></div><div className="onboarding-steps">{ONBOARDING_SECTIONS.map((section, index) => <button key={section.id} className={index === onboardingSection ? "active" : index < onboardingSection ? "complete" : ""} onClick={() => setOnboardingSection(index)}>{index + 1}. {section.title}</button>)}</div>{(() => { const section = ONBOARDING_SECTIONS[onboardingSection]; return <div className="onboarding-body"><h3>{section.title}</h3><p>{section.description}</p><div className="onboarding-questions">{section.questions.map((question) => { const key = `${section.id}.${question.key}`; return <label key={key}>{question.label}<textarea rows={2} value={onboardingAnswers[key] || ""} onChange={(event) => setOnboardingAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder={question.placeholder} /></label>; })}</div><label className="memory-toggle"><input type="checkbox" checked={Boolean(aiMemoryEnabled)} onChange={(event) => setAiMemoryEnabled(event.target.checked)} /><span><strong>Allow AI personalization</strong><small>Use included answers to make future agent responses more relevant.</small></span></label><label className="memory-toggle section-memory"><input type="checkbox" checked={Boolean(sectionMemory[section.id])} disabled={!aiMemoryEnabled} onChange={(event) => setSectionMemory((current) => ({ ...current, [section.id]: event.target.checked }))} /><span><strong>Include this section in AI memory</strong><small>This section stays saved to your profile, but can be excluded from prompts.</small></span></label><div className="onboarding-actions"><button className="secondary-auth-button" onClick={() => setOnboardingSection((current) => Math.max(0, current - 1))} disabled={onboardingSection === 0}>Back</button>{onboardingSection < ONBOARDING_SECTIONS.length - 1 ? <button className="firebase-button" onClick={() => setOnboardingSection((current) => current + 1)}>Continue</button> : <button className="firebase-button" onClick={saveOnboarding} disabled={accountBusy}>{accountBusy ? "Saving…" : "Save profile"}</button>}</div></div>; })()}</div></div>}
+      {e2bOpen && user && <div className="auth-overlay"><div className="e2b-card"><div className="onboarding-header"><div><span className="eyebrow">E2B secure sandbox</span><h2>Run code safely</h2><p>Execute a short script in an isolated cloud environment and inspect the output.</p></div><button className="icon-button" onClick={() => setE2bOpen(false)}><X size={18} /></button></div><div className="e2b-toolbar"><select value={e2bLanguage} onChange={(event) => setE2bLanguage(event.target.value)}><option value="python">Python</option><option value="javascript">JavaScript</option><option value="bash">Bash</option></select><button className="firebase-button" onClick={runInE2B} disabled={e2bBusy}>{e2bBusy ? <LoaderCircle className="spin" size={16} /> : <Route size={16} />} {e2bBusy ? "Running…" : "Run in E2B"}</button></div><textarea className="e2b-editor" value={e2bCode} onChange={(event) => setE2bCode(event.target.value)} spellCheck="false" />{e2bOutput && <pre className="e2b-output">{e2bOutput}</pre>}</div></div>}
       {notice && user && <div className="notice toast error"><button onClick={() => setNotice("")}><X size={14} /></button>{notice}</div>}
     </div>
   );

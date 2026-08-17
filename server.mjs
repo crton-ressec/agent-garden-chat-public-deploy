@@ -1,6 +1,9 @@
 import "dotenv/config";
 import path from "node:path";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { Sandbox } from "e2b";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -32,6 +35,21 @@ const gemini = process.env.GEMINI_API_KEY
 const requestWindows = new Map();
 const REQUEST_WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = 8;
+const R2_BUCKET = process.env.R2_BUCKET_NAME || process.env.R2_BUCKET;
+const R2_READY = Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && R2_BUCKET);
+const r2 = R2_READY ? new S3Client({ region: "auto", endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } }) : null;
+const E2B_READY = Boolean(process.env.E2B_API_KEY);
+const MAX_R2_FILE_BYTES = 25 * 1024 * 1024;
+const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "application/pdf", "application/json", "text/csv", "text/javascript", "application/javascript", "application/typescript", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+function safeObjectName(name) {
+  return path.basename(String(name || "file")).replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 140) || "file";
+}
+
+function requireR2(res) {
+  if (!R2_READY || !r2) { res.status(503).json({ error: "R2 storage is not configured on the server yet." }); return false; }
+  return true;
+}
 
 async function d1Request(pathname, options = {}) {
   if (!process.env.D1_WORKER_URL || !process.env.D1_WORKER_KEY) return null;
@@ -480,6 +498,71 @@ app.post("/api/profile/onboarding", requireUser, async (req, res) => {
   catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+app.post("/api/storage/presign", requireUser, async (req, res) => {
+  if (!requireR2(res)) return;
+  const name = safeObjectName(req.body?.name);
+  const contentType = String(req.body?.contentType || "application/octet-stream").toLowerCase();
+  const size = Number(req.body?.size || 0);
+  if (!size || size < 1 || size > MAX_R2_FILE_BYTES) return res.status(400).json({ error: "Files must be between 1 byte and 25 MB." });
+  if (!ALLOWED_UPLOAD_TYPES.has(contentType)) return res.status(400).json({ error: "This file type is not supported for R2 uploads." });
+  const key = `users/${encodeURIComponent(req.user.sub)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
+  try {
+    const putUrl = await getSignedUrl(r2, new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, ContentType: contentType }), { expiresIn: 900 });
+    res.json({ key, putUrl, expiresIn: 900, contentType, maxBytes: MAX_R2_FILE_BYTES });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not create an R2 upload URL." }); }
+});
+
+app.post("/api/storage/upload", requireUser, async (req, res) => {
+  if (!requireR2(res)) return;
+  const name = safeObjectName(req.body?.name);
+  const contentType = String(req.body?.contentType || "application/octet-stream").toLowerCase();
+  const raw = String(req.body?.data || "").replace(/^data:[^;]+;base64,/, "");
+  if (!raw) return res.status(400).json({ error: "Upload data is missing." });
+  if (!ALLOWED_UPLOAD_TYPES.has(contentType)) return res.status(400).json({ error: "This file type is not supported for R2 uploads." });
+  const body = Buffer.from(raw, "base64");
+  if (!body.length || body.length > MAX_R2_FILE_BYTES) return res.status(400).json({ error: "Files must be between 1 byte and 25 MB." });
+  const key = `users/${encodeURIComponent(req.user.sub)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
+  try { await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, Body: body, ContentType: contentType })); res.json({ ok: true, key, size: body.length, contentType }); }
+  catch (error) { res.status(502).json({ error: error.message || "Could not upload the file to R2." }); }
+});
+
+app.post("/api/storage/download-url", requireUser, async (req, res) => {
+  if (!requireR2(res)) return;
+  const key = String(req.body?.key || "");
+  if (!key.startsWith(`users/${encodeURIComponent(req.user.sub)}/`)) return res.status(403).json({ error: "That file does not belong to this account." });
+  try { const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }), { expiresIn: 900 }); res.json({ url, expiresIn: 900 }); }
+  catch (error) { res.status(502).json({ error: error.message || "Could not create a download URL." }); }
+});
+
+app.delete("/api/storage/object", requireUser, async (req, res) => {
+  if (!requireR2(res)) return;
+  const key = String(req.body?.key || "");
+  if (!key.startsWith(`users/${encodeURIComponent(req.user.sub)}/`)) return res.status(403).json({ error: "That file does not belong to this account." });
+  try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key })); res.json({ ok: true }); }
+  catch (error) { res.status(502).json({ error: error.message || "Could not delete the file." }); }
+});
+
+app.post("/api/e2b/run", requireUser, userRateLimit, async (req, res) => {
+  if (!E2B_READY) return res.status(503).json({ error: "E2B execution is not configured on the server yet." });
+  const language = String(req.body?.language || "python").toLowerCase();
+  const code = String(req.body?.code || "");
+  const allowedLanguages = new Set(["python", "python3", "javascript", "js", "bash", "sh"]);
+  if (!allowedLanguages.has(language)) return res.status(400).json({ error: "Supported E2B languages are Python, JavaScript, and Bash." });
+  if (!code || code.length > 30000) return res.status(400).json({ error: "Code must be between 1 and 30,000 characters." });
+  const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs || 20000), 1000), 60000);
+  let sandbox;
+  try {
+    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 120000 });
+    const extension = language.startsWith("python") ? "py" : language === "bash" || language === "sh" ? "sh" : "js";
+    const codePath = `/tmp/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
+    await sandbox.files.write(codePath, code);
+    const command = extension === "py" ? `python3 ${codePath}` : extension === "sh" ? `bash ${codePath}` : `node ${codePath}`;
+    const execution = await sandbox.commands.run(command, { timeoutMs });
+    res.json({ ok: true, stdout: execution.stdout || "", stderr: execution.stderr || "", exitCode: execution.exitCode ?? 0, sandbox: "e2b" });
+  } catch (error) { res.status(502).json({ error: error.message || "E2B execution failed." }); }
+  finally { try { await sandbox?.kill(); } catch {} }
+});
+
 app.get("/api/auth/me", (req, res) => {
   res.json({ user: userFromRequest(req) || (authRequired() ? null : TEMP_TEST_USER), authRequired: authRequired(), testUser: authRequired() ? null : TEMP_TEST_USER });
 });
@@ -528,7 +611,7 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
     try {
       const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
       await d1Request("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: req.user.sub, title: message.slice(0, 80) || "New chat", agentId: agent.id, provider: result.provider }) });
-      await d1Request("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "user", content: message, agentId: agent.id, provider: requestedProvider }) });
+      await d1Request("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "user", content: message, agentId: agent.id, provider: requestedProvider, metadata: { files: files.map((file) => ({ name: file.name, storageKey: file.storageKey || null, size: file.size || null, mimeType: file.mimeType || null })) } }) });
       await d1Request("/v1/messages", {
         method: "POST",
         body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "assistant", content: result.answer, agentId: agent.id, provider: result.provider, metadata: { sources: result.sources || [] } }),
