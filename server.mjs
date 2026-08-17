@@ -1,5 +1,6 @@
 import "dotenv/config";
 import path from "node:path";
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -31,6 +32,50 @@ const gemini = process.env.GEMINI_API_KEY
 const requestWindows = new Map();
 const REQUEST_WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = 8;
+
+async function d1Request(pathname, options = {}) {
+  if (!process.env.D1_WORKER_URL || !process.env.D1_WORKER_KEY) return null;
+  const response = await fetch(`${process.env.D1_WORKER_URL}${pathname}`, {
+    ...options,
+    headers: { "content-type": "application/json", "x-agent-garden-key": process.env.D1_WORKER_KEY, ...(options.headers || {}) },
+    signal: AbortSignal.timeout(12000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `D1 Worker returned ${response.status}.`);
+  return data;
+}
+
+function hashPassword(password, saltHex) {
+  return scryptSync(String(password), Buffer.from(saltHex, "hex"), 64).toString("hex");
+}
+
+function passwordMatches(password, saltHex, expectedHex) {
+  try {
+    const actual = Buffer.from(hashPassword(password, saltHex), "hex");
+    const expected = Buffer.from(expectedHex, "hex");
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function sessionCookie(res, user) {
+  const token = jwt.sign(user, process.env.SESSION_SECRET, { expiresIn: "7d" });
+  res.cookie("agent_garden_session", token, { httpOnly: true, secure: isProduction, sameSite: "lax", maxAge: 7 * 24 * 60 * 60 * 1000, path: "/" });
+}
+
+async function saveRemoteUser(user) {
+  try { await d1Request("/v1/users/upsert", { method: "POST", body: JSON.stringify({ user }) }); } catch (error) { console.warn("D1 user sync unavailable:", error.message); }
+}
+
+async function loadAiMemory(userId) {
+  try {
+    const data = await d1Request(`/v1/onboarding/${encodeURIComponent(userId)}`);
+    const included = (data?.answers || []).filter((answer) => answer.aiInclude && answer.value !== null && answer.value !== "");
+    if (!included.length) return "";
+    return `\n\nUser-provided context (only use as personalization; do not expose private details unless relevant):\n${included.map((answer) => `- ${answer.section}/${answer.key}: ${typeof answer.value === "string" ? answer.value : JSON.stringify(answer.value)}`).join("\n")}`;
+  } catch { return ""; }
+}
 
 const AGENTS = {
   coordinator: {
@@ -386,18 +431,53 @@ app.post("/api/auth/firebase", async (req, res) => {
       name: decoded.name || decoded.email.split("@")[0],
       picture: decoded.picture || "",
     };
-    const token = jwt.sign(user, process.env.SESSION_SECRET, { expiresIn: "7d" });
-    res.cookie("agent_garden_session", token, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: "/",
-    });
+    sessionCookie(res, user);
+    await saveRemoteUser({ id: user.sub, authProvider: "google", providerSubject: user.sub, email: user.email, displayName: user.name, avatarUrl: user.picture });
     res.json({ user });
   } catch (error) {
     res.status(401).json({ error: error.message || "Firebase Sign-In verification failed." });
   }
+});
+
+app.post("/api/auth/password/signup", async (req, res) => {
+  if (!process.env.SESSION_SECRET) return res.status(503).json({ error: "Session security is not configured." });
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = String(req.body?.password || "");
+  const name = String(req.body?.name || email.split("@")[0] || "Agent Garden user").trim();
+  if (!/^\S+@\S+\.\S+$/.test(email) || password.length < 8) return res.status(400).json({ error: "Use a valid email and a password of at least 8 characters." });
+  try {
+    const salt = randomBytes(16).toString("hex");
+    const created = await d1Request("/v1/users/password/create", { method: "POST", body: JSON.stringify({ id: `pwd_${randomBytes(12).toString("hex")}`, email, displayName: name, passwordSalt: salt, passwordHash: hashPassword(password, salt) }) });
+    if (!created) return res.status(503).json({ error: "The D1 account service is not configured on Render yet." });
+    const lookup = await d1Request("/v1/users/password", { method: "POST", body: JSON.stringify({ email }) });
+    const remote = lookup?.user;
+    const user = { sub: remote?.id, email, name: remote?.display_name || name, picture: "", authProvider: "password", onboardingComplete: Boolean(remote?.onboarding_complete), aiMemoryEnabled: Boolean(remote?.ai_memory_enabled) };
+    sessionCookie(res, user);
+    res.json({ user });
+  } catch (error) { res.status(error.message.includes("already exists") ? 409 : 502).json({ error: error.message }); }
+});
+
+app.post("/api/auth/password/login", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = String(req.body?.password || "");
+  try {
+    const lookup = await d1Request("/v1/users/password", { method: "POST", body: JSON.stringify({ email }) });
+    const remote = lookup?.user;
+    if (!remote || !passwordMatches(password, remote.password_salt, remote.password_hash)) return res.status(401).json({ error: "Email or password is incorrect." });
+    const user = { sub: remote.id, email: remote.email, name: remote.display_name || email.split("@")[0], picture: remote.avatar_url || "", authProvider: "password", onboardingComplete: Boolean(remote.onboarding_complete), aiMemoryEnabled: Boolean(remote.ai_memory_enabled) };
+    sessionCookie(res, user);
+    res.json({ user });
+  } catch (error) { res.status(502).json({ error: error.message || "The account service is unavailable." }); }
+});
+
+app.get("/api/profile", requireUser, async (req, res) => {
+  try { const profile = await d1Request(`/v1/users/${encodeURIComponent(req.user.sub)}`); const onboarding = await d1Request(`/v1/onboarding/${encodeURIComponent(req.user.sub)}`); res.json({ user: profile?.user || req.user, answers: onboarding?.answers || [] }); }
+  catch (error) { res.status(502).json({ error: error.message }); }
+});
+
+app.post("/api/profile/onboarding", requireUser, async (req, res) => {
+  try { const data = await d1Request("/v1/onboarding/save", { method: "POST", body: JSON.stringify({ ...req.body, userId: req.user.sub }) }); res.json(data || { ok: false }); }
+  catch (error) { res.status(502).json({ error: error.message }); }
 });
 
 app.get("/api/auth/me", (req, res) => {
@@ -418,6 +498,8 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
   if (!message && !files.length) return res.status(400).json({ error: "Write a message or attach a file first." });
   if (message.length > 12000) return res.status(400).json({ error: "Please keep messages under 12,000 characters." });
   let enrichedMessage = message;
+  const memoryContext = await loadAiMemory(req.user.sub);
+  if (memoryContext) enrichedMessage = `${message}${memoryContext}`;
   let webContext = null;
   const publicUrl = extractPublicUrl(message);
   if (publicUrl && ["researcher", "debugger"].includes(agent.id)) {
@@ -442,7 +524,18 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
         result.fallbackReason = "Gemini was unavailable, so this reply came from the lightweight fallback.";
       }
     }
-    res.json({ ...result, agent: agent.id, routingReason, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null });
+    const responsePayload = { ...result, agent: agent.id, routingReason, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
+    try {
+      const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
+      await d1Request("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: req.user.sub, title: message.slice(0, 80) || "New chat", agentId: agent.id, provider: result.provider }) });
+      await d1Request("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "user", content: message, agentId: agent.id, provider: requestedProvider }) });
+      await d1Request("/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "assistant", content: result.answer, agentId: agent.id, provider: result.provider, metadata: { sources: result.sources || [] } }),
+      });
+      responsePayload.chatId = chatId;
+    } catch (persistError) { responsePayload.persistenceNotice = "The reply completed, but chat persistence was temporarily unavailable."; }
+    res.json(responsePayload);
   } catch (error) {
     res.status(502).json({ error: error.message || "The selected provider could not complete the request." });
   }

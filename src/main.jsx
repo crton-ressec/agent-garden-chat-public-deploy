@@ -42,6 +42,34 @@ const starters = [
   { icon: Sparkles, title: "Make something", prompt: "Help me create " },
 ];
 
+const ONBOARDING_SECTIONS = [
+  { id: "about", title: "About you", description: "Help the workspace understand your preferred identity and context.", questions: [
+    { key: "preferredName", label: "What should Agent Garden call you?", placeholder: "Your preferred name" },
+    { key: "location", label: "Where are you generally located?", placeholder: "Country, region, or time zone" },
+    { key: "languages", label: "Which languages should responses use?", placeholder: "English, French, etc." },
+  ] },
+  { id: "work", title: "Work and study", description: "Share the kinds of work where a specialist workspace can help.", questions: [
+    { key: "role", label: "What do you do or study?", placeholder: "Role, field, or program" },
+    { key: "projects", label: "What are you working on lately?", placeholder: "Projects, responsibilities, or interests" },
+    { key: "tools", label: "Which tools or technologies do you use?", placeholder: "Apps, languages, platforms" },
+  ] },
+  { id: "preferences", title: "Communication preferences", description: "Choose how the agents should communicate with you.", questions: [
+    { key: "tone", label: "What tone do you prefer?", placeholder: "Direct, friendly, academic, concise…" },
+    { key: "detail", label: "How much detail should answers include?", placeholder: "Brief by default, thorough when needed…" },
+    { key: "format", label: "What formats help you most?", placeholder: "Steps, tables, examples, code…" },
+  ] },
+  { id: "goals", title: "Goals and support", description: "Tell the workspace what good assistance looks like.", questions: [
+    { key: "goals", label: "What would you like to accomplish?", placeholder: "Learning, building, organizing, creating…" },
+    { key: "challenges", label: "What tends to slow you down?", placeholder: "Research, focus, debugging, writing…" },
+    { key: "success", label: "How will you know the workspace helped?", placeholder: "A finished project, clarity, saved time…" },
+  ] },
+  { id: "boundaries", title: "Boundaries and memory", description: "Decide what may be remembered and used for personalization.", questions: [
+    { key: "avoid", label: "Anything the agents should avoid assuming?", placeholder: "Optional boundaries or context" },
+    { key: "sensitive", label: "Anything you want kept out of AI memory?", placeholder: "Optional; do not share secrets or credentials" },
+    { key: "notes", label: "Anything else you want the workspace to know?", placeholder: "Optional notes" },
+  ] },
+];
+
 function formatTime(date = new Date()) {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
 }
@@ -88,6 +116,17 @@ function App() {
   const [signingIn, setSigningIn] = useState(false);
   const [authDiagnostics, setAuthDiagnostics] = useState(null);
   const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
+  const [authMode, setAuthMode] = useState("login");
+  const [accountForm, setAccountForm] = useState({ name: "", email: "", password: "" });
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [profile, setProfile] = useState(null);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingSection, setOnboardingSection] = useState(0);
+  const [onboardingAnswers, setOnboardingAnswers] = useState({});
+  const [aiMemoryEnabled, setAiMemoryEnabled] = useState(false);
+  const [sectionMemory, setSectionMemory] = useState(Object.fromEntries(ONBOARDING_SECTIONS.map((section) => [section.id, true])));
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [chatId, setChatId] = useState(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const endRef = useRef(null);
@@ -189,6 +228,26 @@ function App() {
   }, [config.firebaseConfig?.apiKey]);
 
   useEffect(() => {
+    if (!user || !config.authRequired || user.sub === "temporary-test-user") return undefined;
+    let cancelled = false;
+    setProfileLoading(true);
+    fetch(`/api/profile?client=${Date.now()}`, { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (cancelled || !data) return;
+        setProfile(data);
+        const answers = {};
+        (data.answers || []).forEach((answer) => { answers[`${answer.section}.${answer.key}`] = answer.value; });
+        setOnboardingAnswers(answers);
+        setAiMemoryEnabled(data.user?.ai_memory_enabled ?? user.aiMemoryEnabled ?? false);
+        if (!data.user?.onboarding_complete) setOnboardingOpen(true);
+      })
+      .catch(() => undefined)
+      .finally(() => { if (!cancelled) setProfileLoading(false); });
+    return () => { cancelled = true; };
+  }, [user, config.authRequired]);
+
+  useEffect(() => {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
@@ -210,6 +269,36 @@ function App() {
     } finally {
       setSigningIn(false);
     }
+  }
+
+  async function submitAccount(event) {
+    event.preventDefault();
+    setAccountBusy(true);
+    setNotice("");
+    try {
+      const endpoint = authMode === "signup" ? "/api/auth/password/signup" : "/api/auth/password/login";
+      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountForm) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Account authentication failed.");
+      setUser(data.user);
+      setAccountForm({ name: "", email: "", password: "" });
+      setOnboardingOpen(authMode === "signup" || !data.user.onboardingComplete);
+    } catch (error) { setNotice(error.message); }
+    finally { setAccountBusy(false); }
+  }
+
+  async function saveOnboarding() {
+    setAccountBusy(true);
+    setNotice("");
+    try {
+      const answers = ONBOARDING_SECTIONS.flatMap((section) => section.questions.map((question) => ({ section: section.id, key: question.key, value: onboardingAnswers[`${section.id}.${question.key}`] || "", aiInclude: Boolean(aiMemoryEnabled && sectionMemory[section.id]) })));
+      const response = await fetch("/api/profile/onboarding", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers, aiMemoryEnabled, completed: true }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not save your onboarding profile.");
+      setOnboardingOpen(false);
+      setNotice("Your personalization settings were saved.");
+    } catch (error) { setNotice(error.message); }
+    finally { setAccountBusy(false); }
   }
 
   async function resetGoogleState() {
@@ -248,6 +337,7 @@ function App() {
     setAgentLog([]);
     setNotice("");
     sessionStorage.removeItem(STORAGE_KEY);
+    setChatId(null);
     inputRef.current?.focus();
   }
 
@@ -314,10 +404,13 @@ function App() {
           provider,
           files: outboundFiles,
           history: messages.map(({ role, content }) => ({ role, content })),
+          chatId,
         }),
       });
       const data = await result.json();
       if (!result.ok) throw new Error(data.error || "The provider did not return an answer.");
+      if (data.chatId) setChatId(data.chatId);
+      if (data.persistenceNotice) setNotice(data.persistenceNotice);
       setMessages((current) => [...current, {
         id: crypto.randomUUID(),
         role: "assistant",
@@ -464,7 +557,8 @@ function App() {
         <div className="activity-log"><div className="activity-title"><span>Activity</span><span className="live-status"><i />Live</span></div>{agentLog.length === 0 ? <div className="empty-activity">Your agent activity will appear here.</div> : agentLog.slice(-4).reverse().map((item) => <div className="activity-item" key={item.id}><span className={`activity-state ${item.status}`} /> <div>{item.label}<small>{item.time}</small></div></div>)}</div>
       </aside>
 
-      {config.authRequired && !user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Firebase-powered workspace</span><h2>Sign up or sign in to continue</h2><p>Use your Google account to create or access your Agent Garden account. Firebase handles authentication; the app does not request Gmail, Drive, or other Google data.</p>{config.firebaseConfig?.apiKey ? <button className="firebase-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={18} /><span>{signingIn ? "Connecting…" : "Continue with Google"}</span></button> : <div className="setup-warning"><strong>Firebase Authentication needs configuration.</strong><span>Add the Firebase web configuration and Admin service-account variables in Render, then reload this page.</span></div>}{notice && <div className="notice error">{notice}</div>}{authDiagnostics && <div className="auth-diagnostics"><div className="diagnostics-heading"><strong>Sign-in diagnostics</strong><span><button className="diagnostics-copy" onClick={resetGoogleState}>Reset state</button> <button className="diagnostics-copy" onClick={copyDiagnostics}>{diagnosticsCopied ? <Check size={14} /> : <Copy size={14} />}{diagnosticsCopied ? "Copied" : "Copy report"}</button></span></div><p>Safe to paste here: tokens, cookies, and secret values are not included.</p><pre>{JSON.stringify(authDiagnostics, null, 2)}</pre></div>}<small>Authentication is provided by Firebase. Agent Garden is an independently built workspace.</small></div></div>}
+      {config.authRequired && !user && <div className="auth-overlay"><div className="auth-card"><div className="auth-mark"><Sparkles size={23} /></div><span className="eyebrow">Secure workspace access</span><h2>{authMode === "signup" ? "Create your Agent Garden account" : "Welcome back to Agent Garden"}</h2><p>Sign in with email and password, or use Google when available. Your chats and personalization settings are stored securely in your account.</p><div className="auth-tabs"><button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button><button className={authMode === "signup" ? "active" : ""} onClick={() => setAuthMode("signup")}>Create account</button></div><form className="account-form" onSubmit={submitAccount}>{authMode === "signup" && <label>Name<input value={accountForm.name} onChange={(event) => setAccountForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your name" autoComplete="name" /></label>}<label>Email<input type="email" required value={accountForm.email} onChange={(event) => setAccountForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" autoComplete="email" /></label><label>Password<input type="password" required minLength={8} value={accountForm.password} onChange={(event) => setAccountForm((current) => ({ ...current, password: event.target.value }))} placeholder="At least 8 characters" autoComplete={authMode === "signup" ? "new-password" : "current-password"} /></label><button className="firebase-button" type="submit" disabled={accountBusy}>{accountBusy ? <LoaderCircle className="spin" size={18} /> : <ShieldCheck size={18} />}<span>{authMode === "signup" ? "Create account" : "Sign in with email"}</span></button></form>{config.firebaseConfig?.apiKey && <button className="secondary-auth-button" onClick={signInWithGoogle} disabled={signingIn}><Sparkles size={17} />{signingIn ? "Connecting…" : "Continue with Google"}</button>}{notice && <div className="notice error">{notice}</div>}<small>Do not use passwords or notes containing secrets. You control whether onboarding answers are used for AI personalization.</small></div></div>}
+      {onboardingOpen && user && <div className="auth-overlay onboarding-overlay"><div className="onboarding-card"><div className="onboarding-header"><div><span className="eyebrow">Personalization setup</span><h2>Build your AI profile</h2><p>Answer at your own pace. You can change or delete this information later.</p></div><span className="onboarding-progress">{onboardingSection + 1} / {ONBOARDING_SECTIONS.length}</span></div><div className="onboarding-steps">{ONBOARDING_SECTIONS.map((section, index) => <button key={section.id} className={index === onboardingSection ? "active" : index < onboardingSection ? "complete" : ""} onClick={() => setOnboardingSection(index)}>{index + 1}. {section.title}</button>)}</div>{(() => { const section = ONBOARDING_SECTIONS[onboardingSection]; return <div className="onboarding-body"><h3>{section.title}</h3><p>{section.description}</p><div className="onboarding-questions">{section.questions.map((question) => { const key = `${section.id}.${question.key}`; return <label key={key}>{question.label}<textarea rows={2} value={onboardingAnswers[key] || ""} onChange={(event) => setOnboardingAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder={question.placeholder} /></label>; })}</div><label className="memory-toggle"><input type="checkbox" checked={Boolean(aiMemoryEnabled)} onChange={(event) => setAiMemoryEnabled(event.target.checked)} /><span><strong>Allow AI personalization</strong><small>Use included answers to make future agent responses more relevant.</small></span></label><label className="memory-toggle section-memory"><input type="checkbox" checked={Boolean(sectionMemory[section.id])} disabled={!aiMemoryEnabled} onChange={(event) => setSectionMemory((current) => ({ ...current, [section.id]: event.target.checked }))} /><span><strong>Include this section in AI memory</strong><small>This section stays saved to your profile, but can be excluded from prompts.</small></span></label><div className="onboarding-actions"><button className="secondary-auth-button" onClick={() => setOnboardingSection((current) => Math.max(0, current - 1))} disabled={onboardingSection === 0}>Back</button>{onboardingSection < ONBOARDING_SECTIONS.length - 1 ? <button className="firebase-button" onClick={() => setOnboardingSection((current) => current + 1)}>Continue</button> : <button className="firebase-button" onClick={saveOnboarding} disabled={accountBusy}>{accountBusy ? "Saving…" : "Save profile"}</button>}</div></div>; })()}</div></div>}
       {notice && user && <div className="notice toast error"><button onClick={() => setNotice("")}><X size={14} /></button>{notice}</div>}
     </div>
   );
