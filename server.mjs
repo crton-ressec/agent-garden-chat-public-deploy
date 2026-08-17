@@ -35,19 +35,20 @@ const gemini = process.env.GEMINI_API_KEY
 const requestWindows = new Map();
 const REQUEST_WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = 8;
-const R2_BUCKET = process.env.R2_BUCKET_NAME || process.env.R2_BUCKET;
-const R2_READY = Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && R2_BUCKET);
-const r2 = R2_READY ? new S3Client({ region: "auto", endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } }) : null;
+const STORAGE_BUCKET = process.env.B2_BUCKET_NAME || process.env.STORAGE_BUCKET_NAME;
+const STORAGE_ENDPOINT = process.env.B2_S3_ENDPOINT || process.env.STORAGE_ENDPOINT;
+const STORAGE_READY = Boolean(STORAGE_BUCKET && STORAGE_ENDPOINT && process.env.B2_KEY_ID && process.env.B2_APPLICATION_KEY);
+const storage = STORAGE_READY ? new S3Client({ region: process.env.B2_REGION || "us-east-005", endpoint: STORAGE_ENDPOINT, forcePathStyle: true, credentials: { accessKeyId: process.env.B2_KEY_ID, secretAccessKey: process.env.B2_APPLICATION_KEY } }) : null;
 const E2B_READY = Boolean(process.env.E2B_API_KEY);
-const MAX_R2_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_STORAGE_FILE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "application/pdf", "application/json", "text/csv", "text/javascript", "application/javascript", "application/typescript", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 function safeObjectName(name) {
   return path.basename(String(name || "file")).replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 140) || "file";
 }
 
-function requireR2(res) {
-  if (!R2_READY || !r2) { res.status(503).json({ error: "R2 storage is not configured on the server yet." }); return false; }
+function requireStorage(res) {
+  if (!STORAGE_READY || !storage) { res.status(503).json({ error: "Backblaze B2 storage is not configured on the server yet." }); return false; }
   return true;
 }
 
@@ -499,46 +500,46 @@ app.post("/api/profile/onboarding", requireUser, async (req, res) => {
 });
 
 app.post("/api/storage/presign", requireUser, async (req, res) => {
-  if (!requireR2(res)) return;
+  if (!requireStorage(res)) return;
   const name = safeObjectName(req.body?.name);
   const contentType = String(req.body?.contentType || "application/octet-stream").toLowerCase();
   const size = Number(req.body?.size || 0);
-  if (!size || size < 1 || size > MAX_R2_FILE_BYTES) return res.status(400).json({ error: "Files must be between 1 byte and 25 MB." });
-  if (!ALLOWED_UPLOAD_TYPES.has(contentType)) return res.status(400).json({ error: "This file type is not supported for R2 uploads." });
+  if (!size || size < 1 || size > MAX_STORAGE_FILE_BYTES) return res.status(400).json({ error: "Files must be between 1 byte and 25 MB." });
+  if (!ALLOWED_UPLOAD_TYPES.has(contentType)) return res.status(400).json({ error: "This file type is not supported for storage uploads." });
   const key = `users/${encodeURIComponent(req.user.sub)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
   try {
-    const putUrl = await getSignedUrl(r2, new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, ContentType: contentType }), { expiresIn: 900 });
-    res.json({ key, putUrl, expiresIn: 900, contentType, maxBytes: MAX_R2_FILE_BYTES });
-  } catch (error) { res.status(502).json({ error: error.message || "Could not create an R2 upload URL." }); }
+    const putUrl = await getSignedUrl(storage, new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, ContentType: contentType }), { expiresIn: 900 });
+    res.json({ key, putUrl, expiresIn: 900, contentType, maxBytes: MAX_STORAGE_FILE_BYTES });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not create an storage upload URL." }); }
 });
 
 app.post("/api/storage/upload", requireUser, async (req, res) => {
-  if (!requireR2(res)) return;
+  if (!requireStorage(res)) return;
   const name = safeObjectName(req.body?.name);
   const contentType = String(req.body?.contentType || "application/octet-stream").toLowerCase();
   const raw = String(req.body?.data || "").replace(/^data:[^;]+;base64,/, "");
   if (!raw) return res.status(400).json({ error: "Upload data is missing." });
-  if (!ALLOWED_UPLOAD_TYPES.has(contentType)) return res.status(400).json({ error: "This file type is not supported for R2 uploads." });
+  if (!ALLOWED_UPLOAD_TYPES.has(contentType)) return res.status(400).json({ error: "This file type is not supported for storage uploads." });
   const body = Buffer.from(raw, "base64");
-  if (!body.length || body.length > MAX_R2_FILE_BYTES) return res.status(400).json({ error: "Files must be between 1 byte and 25 MB." });
+  if (!body.length || body.length > MAX_STORAGE_FILE_BYTES) return res.status(400).json({ error: "Files must be between 1 byte and 25 MB." });
   const key = `users/${encodeURIComponent(req.user.sub)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
-  try { await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, Body: body, ContentType: contentType })); res.json({ ok: true, key, size: body.length, contentType }); }
-  catch (error) { res.status(502).json({ error: error.message || "Could not upload the file to R2." }); }
+  try { await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: contentType })); res.json({ ok: true, key, size: body.length, contentType }); }
+  catch (error) { res.status(502).json({ error: error.message || "Could not upload the file to Backblaze B2." }); }
 });
 
 app.post("/api/storage/download-url", requireUser, async (req, res) => {
-  if (!requireR2(res)) return;
+  if (!requireStorage(res)) return;
   const key = String(req.body?.key || "");
   if (!key.startsWith(`users/${encodeURIComponent(req.user.sub)}/`)) return res.status(403).json({ error: "That file does not belong to this account." });
-  try { const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }), { expiresIn: 900 }); res.json({ url, expiresIn: 900 }); }
+  try { const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 }); res.json({ url, expiresIn: 900 }); }
   catch (error) { res.status(502).json({ error: error.message || "Could not create a download URL." }); }
 });
 
 app.delete("/api/storage/object", requireUser, async (req, res) => {
-  if (!requireR2(res)) return;
+  if (!requireStorage(res)) return;
   const key = String(req.body?.key || "");
   if (!key.startsWith(`users/${encodeURIComponent(req.user.sub)}/`)) return res.status(403).json({ error: "That file does not belong to this account." });
-  try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key })); res.json({ ok: true }); }
+  try { await storage.send(new DeleteObjectCommand({ Bucket: STORAGE_BUCKET, Key: key })); res.json({ ok: true }); }
   catch (error) { res.status(502).json({ error: error.message || "Could not delete the file." }); }
 });
 
@@ -549,10 +550,10 @@ app.post("/api/e2b/run", requireUser, userRateLimit, async (req, res) => {
   const allowedLanguages = new Set(["python", "python3", "javascript", "js", "bash", "sh"]);
   if (!allowedLanguages.has(language)) return res.status(400).json({ error: "Supported E2B languages are Python, JavaScript, and Bash." });
   if (!code || code.length > 30000) return res.status(400).json({ error: "Code must be between 1 and 30,000 characters." });
-  const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs || 20000), 1000), 60000);
+  const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs || 20000), 1000), 300000);
   let sandbox;
   try {
-    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 120000 });
+    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 300000 });
     const extension = language.startsWith("python") ? "py" : language === "bash" || language === "sh" ? "sh" : "js";
     const codePath = `/tmp/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
     await sandbox.files.write(codePath, code);
