@@ -35,10 +35,14 @@ const gemini = process.env.GEMINI_API_KEY
 const requestWindows = new Map();
 const REQUEST_WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = 8;
-const STORAGE_BUCKET = process.env.B2_BUCKET_NAME || process.env.STORAGE_BUCKET_NAME;
-const STORAGE_ENDPOINT = process.env.B2_S3_ENDPOINT || process.env.STORAGE_ENDPOINT;
-const STORAGE_READY = Boolean(STORAGE_BUCKET && STORAGE_ENDPOINT && process.env.B2_KEY_ID && process.env.B2_APPLICATION_KEY);
-const storage = STORAGE_READY ? new S3Client({ region: process.env.B2_REGION || "us-east-005", endpoint: STORAGE_ENDPOINT, credentials: { accessKeyId: process.env.B2_KEY_ID, secretAccessKey: process.env.B2_APPLICATION_KEY } }) : null;
+const STORAGE_PROVIDER = String(process.env.STORAGE_PROVIDER || (process.env.TIGRIS_ACCESS_KEY_ID ? "tigris" : "b2")).toLowerCase();
+const STORAGE_BUCKET = process.env.TIGRIS_BUCKET_NAME || process.env.B2_BUCKET_NAME || process.env.STORAGE_BUCKET_NAME;
+const STORAGE_ENDPOINT = process.env.TIGRIS_ENDPOINT || process.env.B2_S3_ENDPOINT || process.env.STORAGE_ENDPOINT || (STORAGE_PROVIDER === "tigris" ? "https://t3.storage.dev" : "");
+const STORAGE_REGION = process.env.TIGRIS_REGION || process.env.B2_REGION || process.env.STORAGE_REGION || (STORAGE_PROVIDER === "tigris" ? "auto" : "us-east-005");
+const STORAGE_ACCESS_KEY_ID = process.env.TIGRIS_ACCESS_KEY_ID || process.env.B2_KEY_ID || process.env.STORAGE_ACCESS_KEY_ID;
+const STORAGE_SECRET_ACCESS_KEY = process.env.TIGRIS_SECRET_ACCESS_KEY || process.env.B2_APPLICATION_KEY || process.env.STORAGE_SECRET_ACCESS_KEY;
+const STORAGE_READY = Boolean(STORAGE_BUCKET && STORAGE_ENDPOINT && STORAGE_ACCESS_KEY_ID && STORAGE_SECRET_ACCESS_KEY);
+const storage = STORAGE_READY ? new S3Client({ region: STORAGE_REGION, endpoint: STORAGE_ENDPOINT, forcePathStyle: false, credentials: { accessKeyId: STORAGE_ACCESS_KEY_ID, secretAccessKey: STORAGE_SECRET_ACCESS_KEY } }) : null;
 const E2B_READY = Boolean(process.env.E2B_API_KEY);
 const MAX_STORAGE_FILE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "application/pdf", "application/json", "text/csv", "text/javascript", "application/javascript", "application/typescript", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -48,7 +52,7 @@ function safeObjectName(name) {
 }
 
 function requireStorage(res) {
-  if (!STORAGE_READY || !storage) { res.status(503).json({ error: "Backblaze B2 storage is not configured on the server yet." }); return false; }
+  if (!STORAGE_READY || !storage) { res.status(503).json({ error: `${STORAGE_PROVIDER === "tigris" ? "Tigris" : "Object storage"} is not configured on the server yet.` }); return false; }
   return true;
 }
 
@@ -669,7 +673,7 @@ app.post("/api/storage/upload", requireUser, async (req, res) => {
     await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: contentType }));
     try { await indexWorkspaceArtifacts(req.user.sub, [{ name, key, size: body.length, contentType }], "Uploaded workspace file"); } catch (error) { console.warn("D1 file index unavailable:", error.message); }
     res.json({ ok: true, key, name, size: body.length, contentType });
-  } catch (error) { res.status(502).json({ error: error.message || "Could not upload the file to Backblaze B2." }); }
+  } catch (error) { res.status(502).json({ error: error.message || `Could not upload the file to ${STORAGE_PROVIDER}.` }); }
 });
 
 app.get("/api/storage/files", requireUser, async (req, res) => {

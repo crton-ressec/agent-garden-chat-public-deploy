@@ -29,3 +29,15 @@ services:
         sync: false
       - key: SESSION_SECRET
         sync: false
+      - key: STORAGE_PROVIDER
+        value: tigris
+      - key: TIGRIS_BUCKET_NAME
+        sync: false
+      - key: TIGRIS_ENDPOINT
+        value: https://t3.storage.dev
+      - key: TIGRIS_REGION
+        value: auto
+      - key: TIGRIS_ACCESS_KEY_ID
+        sync: false
+      - key: TIGRIS_SECRET_ACCESS_KEY
+        sync: false
