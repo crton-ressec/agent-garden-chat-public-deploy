@@ -406,9 +406,15 @@ function isExecutionCapabilityQuestion(message) {
 function isComputerRequest(message) {
   const text = String(message || "").trim();
   if (!text || isCasualMessage(text) || isExecutionCapabilityQuestion(text)) return false;
-  return /\b(use|open|access|work in|run|execute|test|debug|inspect|check|create|write|save|install|download|convert|calculate|plot|chart|graph|visuali[sz]e|launch)\b[\s\S]{0,100}\b(terminal|computer|sandbox|machine|environment|python|python3|javascript|node|bash|shell|command|script|code|file|folder|directory|package|data|csv|json|image|chart|plot)\b/i.test(text)
+  return /\b(run|execute|test|debug|inspect|check|create|write|save|install|download|convert|calculate|plot|chart|graph|visuali[sz]e|launch|use|open|access|work in)\b[\s\S]{0,140}\b(terminal|computer|sandbox|machine|environment|python|python3|javascript|node|bash|shell|command|script|code|file|folder|directory|package|data|csv|json|image|chart|plot)\b/i.test(text)
     || /```(?:python|py|javascript|js|node|bash|sh)?\s*[\s\S]*```/i.test(text)
-    || (/\b(command|terminal|sandbox|computer)\b/i.test(text) && /\b(please|can you|i want|need you|make|run|do)\b/i.test(text));
+    || /\b(?:run|execute|test)\b[\s\S]{0,80}\b(?:this|the|my)\b[\s\S]{0,80}\b(?:code|script|file|program)\b/i.test(text)
+    || /\b(command|terminal|sandbox|computer)\b[\s\S]*\b(please|can you|i want|need you|make|run|do)\b/i.test(text);
+}
+function isWebImageRequest(message) {
+  const text = String(message || "");
+  return /\b(find|fetch|search|download|get|show|pull|retrieve)\b[\s\S]{0,100}\b(image|images|photo|photos|picture|pictures|illustration|logo|wallpaper)s?\b/i.test(text)
+    && /\b(web|internet|online|from the web|from google|from bing|url|urls)\b/i.test(text);
 }
 
 function isFileCreationRequest(message) {
@@ -533,7 +539,8 @@ function resolveAgent(requestedId, message, files) {
     const route = routeRequest(message, files);
     return { agent: { id: route.id, ...AGENTS[route.id], ...(route.casual ? { prompt: "You are a warm, natural conversational assistant inside a multi-agent workspace. Respond directly to the user’s greeting or small talk. Do not ask onboarding questions, do not assign specialists, and do not turn a simple exchange into a project intake. If the user later asks for substantive work, help them transition naturally." } : route.capability ? { prompt: "Answer capability questions directly and briefly. If asked whether Agent Garden can run Python, JavaScript, or Bash, explain that it can run those languages in an isolated E2B Ubuntu sandbox, show a short example of what the user should ask, and make clear that you did not execute anything unless the user explicitly asks you to run it. Do not call tools, generate code, or start E2B for a capability question." } : {}) }, routingReason: route.reason, casual: Boolean(route.casual), execute: Boolean(route.execute) && !route.casual, generateCode: Boolean(route.generateCode) && !route.casual };
   }
-  return { agent: { id: requestedId, ...AGENTS[requestedId] }, routingReason: "Selected manually by the user.", casual: false, execute: false, generateCode: false };
+  const explicitExecution = requestedId === "coder" && (isComputerRequest(message) || isFileCreationRequest(message) || /```(?:python|py|javascript|js|node|bash|sh)?\s*[\s\S]*```/i.test(String(message || "")));
+  return { agent: { id: requestedId, ...AGENTS[requestedId] }, routingReason: explicitExecution ? "Coder was selected manually and the message explicitly requests execution, so it will use the E2B terminal." : "Selected manually by the user.", casual: false, execute: explicitExecution, generateCode: explicitExecution && !/```[\s\S]*```/i.test(String(message || "")) };
 }
 
 app.set("trust proxy", 1);
@@ -765,6 +772,31 @@ async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath, gener
   return artifacts;
 }
 
+async function fetchWebImages({ query, userId, limit = 5 }) {
+  if (!storage || !STORAGE_READY) throw new Error("Persistent storage is not configured.");
+  const response = await fetch(`https://www.bing.com/images/search?q=${encodeURIComponent(String(query || "").slice(0, 240))}`, { headers: { "User-Agent": "Mozilla/5.0 (Agent Garden image retrieval)" }, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`Image search returned HTTP ${response.status}.`);
+  const raw = await response.text(); const candidates = []; const seen = new Set();
+  for (const match of raw.matchAll(/murl":"(https?:\/\/[^" ]+)/gi)) {
+    const url = match[1].replace(/\\\\\//g, "/").replace(/\\\//g, "/"); if (!seen.has(url)) { seen.add(url); candidates.push(url); }
+    if (candidates.length >= limit * 3) break;
+  }
+  const artifacts = [];
+  for (const sourceUrl of candidates) {
+    if (artifacts.length >= limit) break;
+    try {
+      const imageResponse = await fetch(sourceUrl, { headers: { "User-Agent": "Mozilla/5.0 (Agent Garden image retrieval)" }, redirect: "follow", signal: AbortSignal.timeout(12000) });
+      const contentType = String(imageResponse.headers.get("content-type") || "").toLowerCase(); if (!imageResponse.ok || !contentType.startsWith("image/")) continue;
+      const body = Buffer.from(await imageResponse.arrayBuffer()); if (!body.length || body.length > 8 * 1024 * 1024) continue;
+      const extension = contentType.split("/")[1]?.split(";")[0]?.replace("jpeg", "jpg") || "bin"; const name = `web-image-${artifacts.length + 1}.${extension}`; const fileId = `file_${randomBytes(12).toString("hex")}`; const key = `users/${encodeURIComponent(userId)}/files/${fileId}-${name}`;
+      await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: contentType, ContentDisposition: `attachment; filename="${name}"` }));
+      const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 }); artifacts.push({ fileId, name, key, size: body.length, contentType, url, sourceUrl, expiresIn: 900, createdAt: new Date().toISOString() });
+    } catch {}
+  }
+  if (!artifacts.length) throw new Error("No downloadable public images were found for that query.");
+  try { await indexWorkspaceArtifacts(userId, artifacts, "Web-fetched images"); } catch (error) { console.warn("D1 web image index unavailable; object upload succeeded:", error.message); }
+  return artifacts;
+}
 async function stageUploadedFilesInE2B({ sandbox, sharePath, files = [] }) {
   const staged = [];
   let totalBytes = 0;
@@ -817,7 +849,7 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
     const stagedInputFiles = await stageUploadedFilesInE2B({ sandbox, sharePath, files: inputFiles });
     await sandbox.files.write(codePath, String(code));
     const scriptCommand = extension === "py" ? `mkdir -p '${sharePath}' && cd '${sharePath}' && python3 '${codePath}'` : extension === "sh" ? `mkdir -p '${sharePath}' && cd '${sharePath}' && bash '${codePath}'` : `mkdir -p '${sharePath}' && cd '${sharePath}' && node '${codePath}'`;
-    const requestedCommands = Array.isArray(commands) ? commands.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8).map((item) => item.slice(0, 12000)) : [];
+    const requestedCommands = Array.isArray(commands) ? commands.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8).map((item) => item.slice(0, 12000)).map((item) => /\bcd\s+['\"]?\//i.test(item) ? item : `cd '${sharePath}' && ${item}`) : [];
     const commandList = requestedCommands.length ? requestedCommands : [scriptCommand];
     const command = commandList.join("\\n");
     publishExecutionProgress(progressId, { userId: String(userId), phase: "running", language: normalized, command, commands: commandList, stdout: "", stderr: "", inputFiles: stagedInputFiles, network: E2B_INTERNET_ENABLED ? "internet-enabled" : "internet-disabled" });
@@ -1333,7 +1365,14 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
 
   try {
     let result;
-    if (casual || isCasualMessage(message)) {
+    if (isWebImageRequest(message)) {
+      try {
+        const imageArtifacts = await fetchWebImages({ query: message, userId: req.user.sub, limit: 5 });
+        result = { answer: `I fetched ${imageArtifacts.length} public image${imageArtifacts.length === 1 ? "" : "s"} and saved them to Workspace files.\n\n${imageArtifacts.map((artifact, index) => `${index + 1}. [${artifact.name}](${artifact.url}) — source: ${artifact.sourceUrl}`).join("\n")}`, provider: "Web Image Retrieval", sources: imageArtifacts.map((artifact) => ({ title: artifact.name, uri: artifact.sourceUrl })), execution: { status: "completed", language: "web", code: "", command: "image search and storage", stdout: `Fetched ${imageArtifacts.length} public images.`, stderr: "", exitCode: 0, durationMs: 0, sandbox: "web", artifacts: imageArtifacts } };
+      } catch (error) {
+        result = { answer: `I couldn’t fetch usable public images for that request. ${error.message}`, provider: "Web Image Retrieval", sources: [], researchNotice: "Image retrieval failed; no image was presented as if it had been downloaded." };
+      }
+    } else if (casual || isCasualMessage(message)) {
       result = { answer: casualReply(message), provider: "Agent Garden", sources: [] };
     } else if (isExecutionCapabilityQuestion(message)) {
       result = { answer: "Yes. I can run Python, JavaScript, and Bash in an isolated E2B Ubuntu terminal. Ask me to run a command or script explicitly; I will show the terminal activity and then summarize the verified result. I did not execute anything for this capability answer.", provider: "Agent Garden", sources: [] };
