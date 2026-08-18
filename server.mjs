@@ -77,7 +77,7 @@ function executionSharePath(userId) {
 
 function explicitMinorSignal(message) {
   const text = String(message || "").toLowerCase();
-  return /(?:i(?:'|\\s)?m|i am|my age is|age is|i turn|under)\\s*(?:only\\s*)?(?:1[0-6]|[0-9])\\b|\\b(?:1[0-6]|[0-9])\\s*(?:years?\\s*old|yo)\\b|\\bunder\\s*17\\b/.test(text);
+  return /(?:i(?:'|\s)?m|i am|my age is|age is|i turn|under)\s*(?:only\s*)?(?:1[0-6]|[0-9])\b|\b(?:1[0-6]|[0-9])\s*(?:years?\s*old|yo)\b|\bunder\s*17\b/.test(text);
 }
 
 async function reportSafetySignal({ userId, message, signal = "explicit_under_17" }) {
