@@ -528,6 +528,29 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
   } finally { try { await sandbox?.kill(); } catch {} }
 }
 
+function isTransientGeminiError(error) {
+  const text = String(error?.message || error || "");
+  return /(?:\b503\b|UNAVAILABLE|high demand|temporarily|overloaded|resource exhausted|rate limit|429)/i.test(text);
+}
+
+function normalizedGeminiError(error) {
+  if (isTransientGeminiError(error)) {
+    const normalized = new Error("Gemini is temporarily unavailable because the model is experiencing high demand.");
+    normalized.code = "GEMINI_TRANSIENT_UNAVAILABLE";
+    return normalized;
+  }
+  return error;
+}
+
+function availabilityFallbackResult(message) {
+  return {
+    answer: "I couldn’t complete that request right now because the available AI providers are temporarily busy. Please try again in a moment, or switch the provider selector and retry.",
+    provider: "Availability fallback",
+    sources: [],
+    fallbackReason: message,
+  };
+}
+
 async function callGemini({ agent, message, history, files }) {
   if (!gemini) throw new Error("Gemini is not configured on the server.");
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
@@ -542,15 +565,23 @@ async function callGemini({ agent, message, history, files }) {
   };
   let response;
   let researchNotice = "";
+  const generate = async (requestConfig) => {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { return await gemini.models.generateContent({ model, contents, config: requestConfig }); }
+      catch (error) {
+        lastError = error;
+        if (!isTransientGeminiError(error) || attempt === 1) throw normalizedGeminiError(error);
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
+    }
+    throw normalizedGeminiError(lastError);
+  };
   try {
-    response = await gemini.models.generateContent({
-      model,
-      contents,
-      config: agent.search ? { ...config, tools: [{ googleSearch: {} }] } : config,
-    });
+    response = await generate(agent.search ? { ...config, tools: [{ googleSearch: {} }] } : config);
   } catch (groundingError) {
-    if (!agent.search) throw groundingError;
-    response = await gemini.models.generateContent({ model, contents, config });
+    if (!agent.search) throw normalizedGeminiError(groundingError);
+    response = await generate(config);
     researchNotice = "Google Search grounding was unavailable for this reply, so the answer was generated without live web sources.";
   }
   const answer = response.text?.trim();
@@ -861,8 +892,13 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
         result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files });
       } catch (pollinationsError) {
         if (files.length || pollinationsError.code !== "POLLINATIONS_QUEUE_FULL") throw pollinationsError;
-        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files });
-        result.fallbackReason = "Pollinations’ anonymous queue was full, so this reply was completed by Gemini automatically.";
+        try {
+          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files });
+          result.fallbackReason = "Pollinations’ anonymous queue was full, so this reply was completed by Gemini automatically.";
+        } catch (geminiError) {
+          if (geminiError.code !== "GEMINI_TRANSIENT_UNAVAILABLE") throw geminiError;
+          result = availabilityFallbackResult("Pollinations was full and Gemini was temporarily unavailable.");
+        }
       }
     } else {
       try {
@@ -873,7 +909,9 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
           result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files });
           result.fallbackReason = "Gemini was unavailable, so this reply came from the lightweight fallback.";
         } catch (pollinationsError) {
-          throw geminiError;
+          if (isTransientGeminiError(geminiError) || pollinationsError.code === "POLLINATIONS_QUEUE_FULL") {
+            result = availabilityFallbackResult("Gemini and Pollinations were temporarily unavailable.");
+          } else throw geminiError;
         }
       }
     }
