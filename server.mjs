@@ -509,25 +509,35 @@ async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath, gener
   const scan = await sandbox.commands.run(`find '${sharePath}' -type f -mmin -5 -size -10M ! -path '${codePath}' 2>/dev/null | head -40`, { timeoutMs: 10000 });
   const discovered = String(scan.stdout || "").split("\\n").map((value) => value.trim()).filter((value) => value && value !== codePath);
   const paths = requestedNames.size
-    ? discovered.filter((value) => requestedNames.has(safeObjectName(path.basename(value))))
+    ? [...requestedNames].map((name) => `${sharePath}/${name}`)
     : discovered.filter((value) => !value.endsWith(".py") && !value.endsWith(".js") && !value.endsWith(".sh"));
   const artifacts = [];
-  for (const artifactPath of paths.slice(0, 8)) {
+  const failures = [];
+  for (const artifactPath of paths.slice(0, 12)) {
     const name = safeObjectName(path.basename(artifactPath));
     const quotedPath = "'" + artifactPath.replaceAll("'", "'\\\\''") + "'";
-    const encoded = await sandbox.commands.run(`base64 -w0 -- ${quotedPath}`, { timeoutMs: 15000 });
-    const body = Buffer.from(String(encoded.stdout || "").trim(), "base64");
-    if (!body.length || body.length > 10 * 1024 * 1024) continue;
-    const fileId = `file_${randomBytes(12).toString("hex")}`;
-    const key = `users/${encodeURIComponent(userId)}/files/${fileId}-${name}`;
-    await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: artifactContentType(name), ContentDisposition: `attachment; filename="${name}"` }));
-    const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 });
-    artifacts.push({ fileId, name, key, size: body.length, contentType: artifactContentType(name), url, expiresIn: 900, createdAt: new Date().toISOString() });
+    try {
+      const exists = await sandbox.commands.run(`test -f ${quotedPath}`, { timeoutMs: 10000 });
+      if (exists.exitCode && exists.exitCode !== 0) { failures.push(`${name}: file was not found in the E2B workspace`); continue; }
+      let encoded;
+      try { encoded = await sandbox.commands.run(`base64 -w 0 ${quotedPath}`, { timeoutMs: 30000 }); }
+      catch { encoded = await sandbox.commands.run(`base64 ${quotedPath}`, { timeoutMs: 30000 }); }
+      if (encoded.exitCode && encoded.exitCode !== 0) { failures.push(`${name}: base64 read failed with exit status ${encoded.exitCode}`); continue; }
+      const body = Buffer.from(String(encoded.stdout || "").replace(/\\s+/g, ""), "base64");
+      if (!body.length || body.length > 10 * 1024 * 1024) { failures.push(`${name}: empty or oversized file`); continue; }
+      const fileId = `file_${randomBytes(12).toString("hex")}`;
+      const key = `users/${encodeURIComponent(userId)}/files/${fileId}-${name}`;
+      await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: artifactContentType(name), ContentDisposition: `attachment; filename="${name}"` }));
+      const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 });
+      artifacts.push({ fileId, name, key, size: body.length, contentType: artifactContentType(name), url, expiresIn: 900, createdAt: new Date().toISOString() });
+    } catch (error) { failures.push(`${name}: ${error.message}`); }
   }
+  if (failures.length && !artifacts.length) throw new Error(failures.join("; "));
   if (artifacts.length) {
     try { await indexWorkspaceArtifacts(userId, artifacts, "E2B-generated workspace files"); }
     catch (error) { console.warn("D1 E2B artifact index unavailable; object upload succeeded:", error.message); }
   }
+  if (failures.length) console.warn("Some E2B artifacts could not be finalized:", failures.join("; "));
   return artifacts;
 }
 
