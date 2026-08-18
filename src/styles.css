@@ -150,3 +150,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .execution-artifacts a svg { color: #aebeff; }
 .execution-artifacts a span { margin-left: auto; color: #79869a; font-size: 9px; }
 @keyframes terminalBlink { 50% { opacity: 0; } }
+
+.admin-moderation-launcher { position: fixed; right: 18px; bottom: 82px; z-index: 18; width: auto; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 12px; border: 1px solid #59698f; border-radius: 999px; background: rgba(28, 34, 49, .94); color: #dce5ff; box-shadow: 0 8px 24px rgba(0,0,0,.28); font-size: 11px; font-weight: 800; cursor: pointer; }
+.admin-moderation-launcher:hover { background: #354264; transform: translateY(-1px); }
+.admin-moderation-launcher:disabled { opacity: .7; cursor: wait; }
+@media (max-width: 620px) { .admin-moderation-launcher { right: 12px; bottom: 74px; min-height: 34px; padding: 8px 10px; } .admin-moderation-launcher span { display: none; } }
