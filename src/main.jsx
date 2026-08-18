@@ -581,7 +581,7 @@ function App() {
     setNotice("");
     const casualMessage = /^(hi|hello|hey|yo|sup|what's up|how are you|thanks|thank you|good morning|good evening)[!.?, ]*$/i.test(message);
     const capabilityQuestion = /^(can|could|does|do|is|are|will|what|how)\b[\s\S]{0,100}\b(run|execute|use|access|support)\b[\s\S]{0,60}\b(python|python3|javascript|node|bash|shell|code|script)\b[\s\S]*\?*$/i.test(message);
-    const executionIntent = !casualMessage && !capabilityQuestion && (/\b(run|execute|test|plot|chart|graph|visuali[sz]e)\b[\s\S]{0,80}\b(python|python3|javascript|node|bash|shell|code|script|data|chart|plot)\b/i.test(message) || /```(?:python|py|javascript|js|bash|sh)?/i.test(message));
+    const executionIntent = !casualMessage && !capabilityQuestion && ((/\b(run|execute|test|plot|chart|graph|visuali[sz]e|use|open|access|create|write|save|install|download|convert|calculate|inspect|check|debug)\b[\s\S]{0,100}\b(terminal|computer|sandbox|machine|environment|python|python3|javascript|node|bash|shell|command|code|script|file|folder|package|data|csv|json|image|chart|plot)\b/i.test(message)) || /```(?:python|py|javascript|js|node|bash|sh)?/i.test(message) || (/\b(command|terminal|sandbox|computer)\b/i.test(message) && /\b(please|can you|i want|need you|make|run|do)\b/i.test(message)));
     const executionId = executionIntent ? crypto.randomUUID() : null;
     if (executionIntent) setChatExecutionLive({ id: executionId, active: true, phase: "provisioning", elapsed: 0, startedAt: Date.now(), stdout: "", stderr: "", command: "ubuntu@sandbox:~$ preparing E2B command" });
 

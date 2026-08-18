@@ -254,6 +254,14 @@ function isExecutionCapabilityQuestion(message) {
   return /^(can|could|does|do|is|are|will|what|how)\b[\s\S]{0,100}\b(run|execute|use|access|support)\b[\s\S]{0,60}\b(python|python3|javascript|node|bash|shell|code|script)\b[\s\S]*\?*$/i.test(String(message || "").trim());
 }
 
+function isComputerRequest(message) {
+  const text = String(message || "").trim();
+  if (!text || isCasualMessage(text) || isExecutionCapabilityQuestion(text)) return false;
+  return /\b(use|open|access|work in|run|execute|test|debug|inspect|check|create|write|save|install|download|convert|calculate|plot|chart|graph|visuali[sz]e|launch)\b[\s\S]{0,100}\b(terminal|computer|sandbox|machine|environment|python|python3|javascript|node|bash|shell|command|script|code|file|folder|directory|package|data|csv|json|image|chart|plot)\b/i.test(text)
+    || /```(?:python|py|javascript|js|node|bash|sh)?\s*[\s\S]*```/i.test(text)
+    || (/\b(command|terminal|sandbox|computer)\b/i.test(text) && /\b(please|can you|i want|need you|make|run|do)\b/i.test(text));
+}
+
 function routeRequest(message, files) {
   if (Array.isArray(files) && files.length) {
     return { id: "fileAnalyst", reason: "An attachment was supplied, so File Analyst was selected." };
@@ -268,7 +276,7 @@ function routeRequest(message, files) {
   if (/\b(pie chart|bar chart|line chart|scatter plot|plot|graph|visuali[sz]e|data visualization)\b/i.test(String(message || ""))) {
     return { id: "coder", execute: true, generateCode: true, reason: "A visualization request was detected, so Agent Garden will generate and run code in the E2B sandbox." };
   }
-  if (/```(?:python|py|javascript|js|bash|sh)?\s*[\s\S]*```/i.test(String(message || "")) || /\b(run|execute|test)\b[\s\S]{0,40}\b(python|python3|javascript|node|bash|shell|code|script)\b/i.test(String(message || ""))) {
+  if (isComputerRequest(message)) {
     return { id: "coder", execute: true, reason: "A code-execution request was detected, so the request will run in the E2B sandbox." };
   }
   if (/https?:\/\/\S+/.test(text) && /\b(debug|broken|error|issue|bug|not working|fails|failure|console|website|site)\b/.test(text)) {
@@ -449,6 +457,19 @@ function extractExecutionRequest(message) {
   const runMatch = raw.match(/\b(?:run|execute|test)\s+(?:this\s+)?(?:python|python3|javascript|js|node|bash|shell|code|script)\b\s*([\s\S]+)/i);
   const code = afterColon || runMatch?.[1]?.trim() || "";
   return { language, code };
+}
+
+async function generateExecutionResponse({ message, execution, agentPrompt }) {
+  if (!gemini) return null;
+  const verified = [execution.stdout && `STDOUT:\n${execution.stdout}`, execution.stderr && `STDERR:\n${execution.stderr}`, `Exit code: ${execution.exitCode}`].filter(Boolean).join("\n\n").slice(0, 14000);
+  try {
+    const response = await gemini.models.generateContent({
+      model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
+      contents: [{ role: "user", parts: [{ text: `Answer this user after the terminal has actually run. Use only the verified terminal result below. Explain what happened, mention important output, and mention generated files by filename only. User request: ${message}\n\nVerified terminal result:\n${verified}` }] }],
+      config: { systemInstruction: `${agentPrompt} The E2B terminal has already executed the request. Give a concise final assistant answer grounded only in the supplied result. Never expose internal paths or invent execution results.`, temperature: 0.25, maxOutputTokens: 1800 },
+    });
+    return response.text?.trim() || null;
+  } catch { return null; }
 }
 
 async function generateExecutionCode({ message, language = "python", userId, history }) {
@@ -910,9 +931,10 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
       } else {
         const execution = await executeInE2B({ ...request, commands: req.body?.commands, userId: req.user.sub, progressId: req.body?.executionId });
         const output = [execution.stdout && `STDOUT\n${execution.stdout.trim()}`, execution.stderr && `STDERR\n${execution.stderr.trim()}`, `Exit code: ${execution.exitCode}`].filter(Boolean).join("\n\n");
+        const generatedResponse = await generateExecutionResponse({ message, execution, agentPrompt: agent.prompt });
         const fence = "```";
         const artifactText = execution.artifacts?.length ? `\n\n### Saved files\n\n${execution.artifacts.map((artifact) => `- [${artifact.name}](${artifact.url}) — ${(artifact.size / 1024).toFixed(1)} KB, saved to Workspace files`).join("\n")}` : execution.artifactNotice ? `\n\n> ${execution.artifactNotice}` : "";
-        result = { answer: `## E2B execution\n\nI ran the ${execution.language} code in the Agent Garden sandbox.\n\n${fence}${execution.language}\n${execution.code}\n${fence}\n\n### Output\n\n${fence}text\n${output || "(no output)"}\n${fence}${artifactText}`, provider: "E2B", sources: [], execution };
+        result = { answer: `${generatedResponse ? `${generatedResponse}\n\n` : ""}## Terminal execution\n\nI ran this in the Agent Garden E2B terminal:\n\n${fence}${execution.language}\n${execution.code}\n${fence}\n\n### Output\n\n${fence}text\n${output || "(no output)"}\n${fence}${artifactText}`, provider: "E2B", sources: [], execution };
       }
     } else if (requestedProvider === "pollinations") {
       try {
