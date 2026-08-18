@@ -52,6 +52,13 @@ function safeObjectName(name) {
   return path.basename(String(name || "file")).replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 140) || "file";
 }
 
+function sanitizeAssistantContent(content) {
+  return String(content || "")
+    .replace(/\[([^\]]+)\]\((?:sandbox:)?(?:\/|%2F)[^)]+\)/gi, "$1")
+    .replace(/sandbox:(?:\/|%2F)[^\s)`]+/gi, "the generated file")
+    .replace(/(?:\/tmp\/agent-garden-users\/|\/home\/user\/|\/home\/ubuntu\/)[^\s)`]+/gi, "the generated file");
+}
+
 function executionUserFolder(userId) {
   return `user-${createHash("sha256").update(String(userId || "anonymous")).digest("hex").slice(0, 24)}`;
 }
@@ -93,7 +100,8 @@ async function d1RequestWithRetry(pathname, options = {}) {
 }
 
 async function indexWorkspaceArtifacts(userId, artifacts, content = "Workspace artifact") {
-  const normalized = (Array.isArray(artifacts) ? artifacts : []).filter((artifact) => artifact?.key).map((artifact) => ({
+  const userPrefix = `users/${encodeURIComponent(String(userId))}/`;
+  const normalized = (Array.isArray(artifacts) ? artifacts : []).filter((artifact) => artifact?.key && String(artifact.key).startsWith(userPrefix)).map((artifact) => ({
     name: safeObjectName(artifact.name || path.basename(artifact.key)),
     key: String(artifact.key),
     size: Number(artifact.size || 0),
@@ -176,7 +184,7 @@ const AGENTS = {
     icon: "Code2",
     description: "Designs, writes, and explains practical code changes.",
     provider: "Gemini",
-    prompt: "You are the Coder agent inside Agent Garden. You have access to a real isolated E2B Ubuntu computer through the execution tool. When the user asks to run, execute, test, plot, calculate, inspect, or debug code, use the E2B computer path rather than claiming you cannot execute code. Give secure, runnable, minimal solutions, explain assumptions, and report the actual terminal command, stdout, stderr, exit code, and generated files returned by E2B. Never claim execution unless results are included in the prompt.",
+    prompt: "You are the Coder agent inside Agent Garden. You have access to a real isolated E2B Ubuntu computer through the execution tool. When the user asks to run, execute, test, plot, calculate, inspect, or debug code, use the E2B computer path rather than claiming you cannot execute code. Give secure, runnable, minimal solutions, explain assumptions, and report the actual terminal command, stdout, stderr, exit code, and generated files returned by E2B. Never claim execution unless results are included in the prompt. Never expose sandbox:/ links, /tmp/agent-garden-users paths, /home/user paths, or any other internal E2B filesystem path; refer to generated files by their filename and Workspace Files link only.",
   },
   debugger: {
     label: "Debugger",
@@ -435,8 +443,8 @@ async function generateExecutionCode({ message, language = "python", userId, his
   const sharePath = executionSharePath(userId);
   const response = await gemini.models.generateContent({
     model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
-    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. Save generated visual or data artifacts under ${sharePath} or the current working directory and print each exact output filename. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
-    config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only.`, temperature: 0.15, maxOutputTokens: 5000 },
+    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. Save generated visual or data artifacts under ${sharePath} or the current working directory and print each output filename, not its absolute path. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
+    config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only. Never create or print sandbox:/ links or expose absolute internal filesystem paths; print filenames only.`, temperature: 0.15, maxOutputTokens: 5000 },
   });
   const raw = response.text?.trim() || "";
   const fenced = raw.match(/```(?:python|py|javascript|js|node|bash|sh)?\\s*([\\s\\S]*?)```/i);
@@ -463,6 +471,10 @@ async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath }) {
     await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: artifactContentType(name), ContentDisposition: `attachment; filename="${name}"` }));
     const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 });
     artifacts.push({ name, key, size: body.length, contentType: artifactContentType(name), url, expiresIn: 900 });
+  }
+  if (artifacts.length) {
+    try { await indexWorkspaceArtifacts(userId, artifacts, "E2B-generated workspace files"); }
+    catch (error) { console.warn("D1 E2B artifact index unavailable; object upload succeeded:", error.message); }
   }
   return artifacts;
 }
@@ -914,6 +926,10 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
           } else throw geminiError;
         }
       }
+    }
+    result.answer = sanitizeAssistantContent(result.answer);
+    if (result.execution?.artifacts?.length) {
+      result.execution.artifacts = result.execution.artifacts.filter((artifact) => artifact?.key && String(artifact.key).startsWith(`users/${encodeURIComponent(String(req.user.sub))}/`));
     }
     const responsePayload = { ...result, agent: agent.id, routingReason, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
     const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
