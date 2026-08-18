@@ -217,12 +217,16 @@ const AUTO_AGENT = {
   provider: "Smart route",
 };
 
+function isCasualMessage(message) {
+  return /^(hi|hello|hey|yo|sup|what's up|how are you|thanks|thank you|good morning|good evening)[!.?, ]*$/i.test(String(message || "").trim());
+}
+
 function routeRequest(message, files) {
   if (Array.isArray(files) && files.length) {
     return { id: "fileAnalyst", reason: "An attachment was supplied, so File Analyst was selected." };
   }
   const text = String(message || "").toLowerCase();
-  if (/^(hi|hello|hey|yo|sup|what's up|how are you|thanks|thank you|good morning|good evening)[!.?, ]*$/i.test(String(message || "").trim())) {
+  if (isCasualMessage(message)) {
     return { id: "coordinator", casual: true, reason: "This is casual conversation, so the workspace will answer naturally without starting a project intake." };
   }
   if (/\b(pie chart|bar chart|line chart|scatter plot|plot|graph|visuali[sz]e|data visualization)\b/i.test(String(message || ""))) {
@@ -281,7 +285,7 @@ async function fetchPublicPage(url) {
 function resolveAgent(requestedId, message, files) {
   if (requestedId === "auto" || !AGENTS[requestedId]) {
     const route = routeRequest(message, files);
-    return { agent: { id: route.id, ...AGENTS[route.id], ...(route.casual ? { prompt: "You are a warm, natural conversational assistant inside a multi-agent workspace. Respond directly to the user’s greeting or small talk. Do not ask onboarding questions, do not assign specialists, and do not turn a simple exchange into a project intake. If the user later asks for substantive work, help them transition naturally." } : {}) }, routingReason: route.reason, execute: Boolean(route.execute), generateCode: Boolean(route.generateCode) };
+    return { agent: { id: route.id, ...AGENTS[route.id], ...(route.casual ? { prompt: "You are a warm, natural conversational assistant inside a multi-agent workspace. Respond directly to the user’s greeting or small talk. Do not ask onboarding questions, do not assign specialists, and do not turn a simple exchange into a project intake. If the user later asks for substantive work, help them transition naturally." } : {}) }, routingReason: route.reason, casual: Boolean(route.casual), execute: Boolean(route.execute) && !route.casual, generateCode: Boolean(route.generateCode) && !route.casual };
   }
   return { agent: { id: requestedId, ...AGENTS[requestedId] }, routingReason: "Selected manually by the user.", execute: false, generateCode: false };
 }
@@ -790,7 +794,7 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
   const requestedAgentId = typeof req.body?.agentId === "string" ? req.body.agentId : "auto";
   const requestedProvider = req.body?.provider === "pollinations" ? "pollinations" : "gemini";
   const files = Array.isArray(req.body?.files) ? req.body.files : [];
-  const { agent, routingReason, execute, generateCode } = resolveAgent(requestedAgentId, message, files);
+  const { agent, routingReason, casual, execute, generateCode } = resolveAgent(requestedAgentId, message, files);
   if (!message && !files.length) return res.status(400).json({ error: "Write a message or attach a file first." });
   if (message.length > 12000) return res.status(400).json({ error: "Please keep messages under 12,000 characters." });
   let enrichedMessage = message;
@@ -809,7 +813,7 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
 
   try {
     let result;
-    if (execute) {
+    if (execute && !casual && !isCasualMessage(message)) {
       const request = extractExecutionRequest(message);
       if (generateCode) request.code = await generateExecutionCode({ message, language: request.language, userId: req.user.sub, history: req.body?.history });
       if (!request.code) {

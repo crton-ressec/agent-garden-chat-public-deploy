@@ -544,7 +544,8 @@ function App() {
     setFiles([]);
     setSending(true);
     setNotice("");
-    const executionIntent = /\b(run|execute|test|plot|chart|graph|visuali[sz]e)\b[\s\S]{0,80}\b(python|python3|javascript|node|bash|shell|code|script|data|chart|plot)\b/i.test(message) || /```(?:python|py|javascript|js|bash|sh)?/i.test(message);
+    const casualMessage = /^(hi|hello|hey|yo|sup|what's up|how are you|thanks|thank you|good morning|good evening)[!.?, ]*$/i.test(message);
+    const executionIntent = !casualMessage && (/\b(run|execute|test|plot|chart|graph|visuali[sz]e)\b[\s\S]{0,80}\b(python|python3|javascript|node|bash|shell|code|script|data|chart|plot)\b/i.test(message) || /```(?:python|py|javascript|js|bash|sh)?/i.test(message));
     const executionId = executionIntent ? crypto.randomUUID() : null;
     if (executionIntent) setChatExecutionLive({ id: executionId, active: true, phase: "provisioning", elapsed: 0, startedAt: Date.now(), stdout: "", stderr: "", command: "ubuntu@sandbox:~$ preparing E2B command" });
 
