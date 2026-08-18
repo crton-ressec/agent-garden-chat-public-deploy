@@ -284,6 +284,14 @@ async function saveRemoteUser(user) {
   try { await d1Request("/v1/users/upsert", { method: "POST", body: JSON.stringify({ user }) }); } catch (error) { console.warn("D1 user sync unavailable:", error.message); }
 }
 
+async function loadConnectorContext(userId) {
+  try {
+    const data = await d1Request(`/v1/connectors/${encodeURIComponent(userId)}`);
+    const connectors = (data?.connectors || []).filter((connector) => connector.enabled);
+    if (!connectors.length) return "";
+    return `\n\nApproved workspace connectors (metadata only; secrets are server-side and must never be printed):\n${connectors.map((connector) => `- ${connector.name} (${connector.kind}) at ${connector.base_url}. The user may authorize this connector for todo and integration actions.`).join("\n")}\nUse only an explicitly relevant connector and state when a connector is unavailable or lacks a documented operation.`;
+  } catch { return ""; }
+}
 async function loadAiMemory(userId) {
   try {
     const data = await d1Request(`/v1/onboarding/${encodeURIComponent(userId)}`);
@@ -468,22 +476,44 @@ function isBlockedHost(hostname) {
 
 async function searchWeb(query) {
   const cleanQuery = String(query || "").trim().slice(0, 300);
-  if (!cleanQuery) return { results: [], sources: [] };
-  const endpoint = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(cleanQuery)}`;
-  const response = await fetch(endpoint, { headers: { "User-Agent": "AgentGardenResearch/1.0" }, signal: AbortSignal.timeout(12000) });
-  if (!response.ok) throw new Error(`Web search returned HTTP ${response.status}.`);
-  const raw = await response.text();
+  if (!cleanQuery) return { results: [], sources: [], provider: "none" };
   const decode = (value) => String(value || "").replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
-  const results = [];
-  const pattern = /<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-  while ((match = pattern.exec(raw)) && results.length < 8) {
-    const url = decode(match[1]);
-    const title = decode(match[2]);
-    const snippet = decode(match[3]);
-    if (/^https?:\/\//i.test(url) && title) results.push({ title, url, snippet });
+  const sources = [];
+  const seen = new Set();
+  const add = (title, url, snippet, provider) => { if (!/^https?:\/\//i.test(url) || !title || seen.has(url)) return; seen.add(url); sources.push({ title: decode(title), url, snippet: decode(snippet), provider }); };
+  const headers = { "User-Agent": "Mozilla/5.0 (Agent Garden research)" };
+  try {
+    const response = await fetch(`https://www.google.com/search?q=${encodeURIComponent(cleanQuery)}&num=8`, { headers, signal: AbortSignal.timeout(12000) });
+    if (response.ok) {
+      const raw = await response.text();
+      const pattern = /<a[^>]+href=["'](\/url\?q=|)(https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let match;
+      while ((match = pattern.exec(raw)) && sources.length < 8) add(match[3], match[2], "Live Google Search result", "Google Search");
+    }
+  } catch {}
+  if (!sources.length) {
+    try {
+      const response = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(cleanQuery)}`, { headers, signal: AbortSignal.timeout(12000) });
+      if (response.ok) {
+        const raw = await response.text();
+        const pattern = /<li[^>]+class=["'][^"']*b_algo[^"']*["'][\s\S]*?<h2><a[^>]+href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a><\/h2>[\s\S]*?(?:<p>([\s\S]*?)<\/p>)?/gi;
+        let match;
+        while ((match = pattern.exec(raw)) && sources.length < 8) add(match[2], match[1], match[3] || "Live Bing Search result", "Bing Search");
+      }
+    } catch {}
   }
-  return { results, sources: results.map(({ title, url }) => ({ title, uri: url })) };
+  if (!sources.length) {
+    try {
+      const response = await fetch(`https://news.google.com/rss/search?q=${encodeURIComponent(cleanQuery)}&hl=en-US&gl=US&ceid=US:en`, { headers, signal: AbortSignal.timeout(12000) });
+      if (response.ok) {
+        const raw = await response.text();
+        const pattern = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<link>(https?:\/\/[^<]+)<\/link>[\s\S]*?<description>([\s\S]*?)<\/description>[\s\S]*?<\/item>/gi;
+        let match;
+        while ((match = pattern.exec(raw)) && sources.length < 8) add(match[1], match[2], match[3], "Google News RSS");
+      }
+    } catch {}
+  }
+  return { results: sources, sources: sources.map(({ title, url }) => ({ title, uri: url })), provider: sources[0]?.provider || "none" };
 }
 async function fetchPublicPage(url) {
   const parsed = new URL(url);
@@ -1128,6 +1158,41 @@ app.post("/api/storage/upload", requireUser, enforceActiveAccount, async (req, r
   } catch (error) { res.status(502).json({ error: error.message || `Could not upload the file to ${STORAGE_PROVIDER}.` }); }
 });
 
+app.get("/api/connectors", requireUser, enforceActiveAccount, async (req, res) => {
+  try {
+    const data = await d1RequestWithRetry(`/v1/connectors/${encodeURIComponent(String(req.user.sub))}`);
+    res.json({ connectors: (data?.connectors || []).map((connector) => ({ ...connector, secretConfigured: true })) });
+  } catch (error) { res.status(502).json({ error: `Connector list unavailable: ${error.message}` }); }
+});
+app.post("/api/connectors", requireUser, enforceActiveAccount, async (req, res) => {
+  try {
+    const body = req.body || {}; const kind = String(body.kind || "").toLowerCase(); const baseUrl = String(body.baseUrl || "").trim();
+    if (!["api", "mcp"].includes(kind)) return res.status(400).json({ error: "Connector type must be api or mcp." });
+    const parsed = new URL(baseUrl); if (parsed.protocol !== "https:") return res.status(400).json({ error: "Connector URL must use HTTPS." });
+    if (!String(body.name || "").trim()) return res.status(400).json({ error: "Connector name is required." });
+    const id = `connector_${randomBytes(12).toString("hex")}`;
+    const config = { authType: String(body.authType || "bearer"), extraHeaders: body.extraHeaders && typeof body.extraHeaders === "object" ? body.extraHeaders : {}, toolAllowlist: Array.isArray(body.toolAllowlist) ? body.toolAllowlist.slice(0, 50) : [], todoOperations: Array.isArray(body.todoOperations) ? body.todoOperations.slice(0, 20) : [] };
+    await d1RequestWithRetry("/v1/connectors", { method: "POST", body: JSON.stringify({ id, userId: req.user.sub, name: String(body.name).trim(), kind, baseUrl: parsed.href, authHeader: String(body.authHeader || "Authorization").slice(0, 120), secretCiphertext: seal(String(body.secret || "")), configCiphertext: sealJson(config), enabled: body.enabled !== false }) });
+    res.status(201).json({ ok: true, connector: { id, name: String(body.name).trim(), kind, baseUrl: parsed.href, enabled: body.enabled !== false, secretConfigured: Boolean(body.secret) } });
+  } catch (error) { res.status(400).json({ error: error.message || "Could not save connector." }); }
+});
+app.patch("/api/connectors/:id", requireUser, enforceActiveAccount, async (req, res) => {
+  try {
+    const body = req.body || {}; const patch = { userId: req.user.sub };
+    if (body.name !== undefined) patch.name = String(body.name).trim();
+    if (body.baseUrl !== undefined) { const parsed = new URL(String(body.baseUrl)); if (parsed.protocol !== "https:") return res.status(400).json({ error: "Connector URL must use HTTPS." }); patch.baseUrl = parsed.href; }
+    if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+    if (body.secret) patch.secretCiphertext = seal(String(body.secret));
+    if (body.authHeader) patch.authHeader = String(body.authHeader).slice(0, 120);
+    if (body.config && typeof body.config === "object") patch.configCiphertext = sealJson(body.config);
+    await d1RequestWithRetry(`/v1/connectors/${encodeURIComponent(String(req.params.id))}`, { method: "PATCH", body: JSON.stringify(patch) });
+    res.json({ ok: true });
+  } catch (error) { res.status(400).json({ error: error.message || "Could not update connector." }); }
+});
+app.delete("/api/connectors/:id", requireUser, enforceActiveAccount, async (req, res) => {
+  try { const data = await d1RequestWithRetry(`/v1/connectors/${encodeURIComponent(String(req.params.id))}`, { method: "DELETE", body: JSON.stringify({ userId: req.user.sub }) }); res.json(data || { ok: true }); }
+  catch (error) { res.status(400).json({ error: error.message || "Could not delete connector." }); }
+});
 app.get("/api/storage/files", requireUser, enforceActiveAccount, async (req, res) => {
   if (!requireStorage(res)) return;
   const prefix = `users/${encodeURIComponent(req.user.sub)}/`;
@@ -1221,8 +1286,9 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
   if (message.length > 12000) return res.status(400).json({ error: "Please keep messages under 12,000 characters." });
   let enrichedMessage = message;
   const memoryContext = await loadAiMemory(req.user.sub);
-  if (memoryContext) enrichedMessage = `${message}${memoryContext}`;
-  const systemContext = isAdminIdentity(req.user) ? "Server-verified role: this authenticated user is the designated Agent Garden administrator. You may explain admin-only controls and help prepare moderation actions, but never bypass the backend’s admin authorization or invent moderation results." : "The authenticated user is not verified as the designated administrator. Do not claim they have admin privileges or expose admin-only data.";
+  const connectorContext = await loadConnectorContext(req.user.sub);
+  if (memoryContext || connectorContext) enrichedMessage = `${message}${memoryContext}${connectorContext}`;
+  const systemContext = `${isAdminIdentity(req.user) ? "Server-verified role: this authenticated user is the designated Agent Garden administrator. You may explain admin-only controls and help prepare moderation actions, but never bypass the backend’s admin authorization or invent moderation results." : "The authenticated user is not verified as the designated administrator. Do not claim they have admin privileges or expose admin-only data."}\n${agent.id === "researcher" ? "This is a current-information request. Do not answer with a knowledge-cutoff disclaimer. Use the supplied live sources or clearly state that live retrieval failed and ask the user to configure a search connector." : ""}`;
   let webContext = null;
   let webSearchContext = null;
   const publicUrl = extractPublicUrl(message);
