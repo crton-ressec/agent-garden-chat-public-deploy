@@ -42,7 +42,7 @@ const STORAGE_REGION = process.env.TIGRIS_REGION || process.env.B2_REGION || pro
 const STORAGE_ACCESS_KEY_ID = process.env.TIGRIS_ACCESS_KEY_ID || process.env.B2_KEY_ID || process.env.STORAGE_ACCESS_KEY_ID;
 const STORAGE_SECRET_ACCESS_KEY = process.env.TIGRIS_SECRET_ACCESS_KEY || process.env.B2_APPLICATION_KEY || process.env.STORAGE_SECRET_ACCESS_KEY;
 const STORAGE_READY = Boolean(STORAGE_BUCKET && STORAGE_ENDPOINT && STORAGE_ACCESS_KEY_ID && STORAGE_SECRET_ACCESS_KEY);
-const storage = STORAGE_READY ? new S3Client({ region: STORAGE_REGION, endpoint: STORAGE_ENDPOINT, forcePathStyle: false, credentials: { accessKeyId: STORAGE_ACCESS_KEY_ID, secretAccessKey: STORAGE_SECRET_ACCESS_KEY } }) : null;
+const storage = STORAGE_READY ? new S3Client({ region: STORAGE_REGION, endpoint: STORAGE_ENDPOINT, forcePathStyle: STORAGE_PROVIDER === "tigris", credentials: { accessKeyId: STORAGE_ACCESS_KEY_ID, secretAccessKey: STORAGE_SECRET_ACCESS_KEY } }) : null;
 const E2B_READY = Boolean(process.env.E2B_API_KEY);
 const executionProgress = new Map();
 const MAX_STORAGE_FILE_BYTES = 25 * 1024 * 1024;
