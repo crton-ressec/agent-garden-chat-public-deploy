@@ -33,8 +33,12 @@ const gemini = process.env.GEMINI_API_KEY
   : null;
 
 const requestWindows = new Map();
+const authRequestWindows = new Map();
 const REQUEST_WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = 8;
+const AUTH_WINDOW_MS = 10 * 60_000;
+const MAX_AUTH_REQUESTS_PER_WINDOW = 12;
+const MAX_PROGRESS_ENTRIES = 5000;
 const STORAGE_PROVIDER = String(process.env.STORAGE_PROVIDER || (process.env.TIGRIS_ACCESS_KEY_ID ? "tigris" : "b2")).toLowerCase();
 const STORAGE_BUCKET = process.env.TIGRIS_BUCKET_NAME || process.env.B2_BUCKET_NAME || process.env.STORAGE_BUCKET_NAME;
 const STORAGE_ENDPOINT = process.env.TIGRIS_ENDPOINT || process.env.B2_S3_ENDPOINT || process.env.STORAGE_ENDPOINT || (STORAGE_PROVIDER === "tigris" ? "https://t3.storage.dev" : "");
@@ -157,7 +161,44 @@ function passwordMatches(password, saltHex, expectedHex) {
 
 function sessionCookie(res, user) {
   const token = jwt.sign(user, process.env.SESSION_SECRET, { expiresIn: "7d" });
-  res.cookie("agent_garden_session", token, { httpOnly: true, secure: isProduction, sameSite: "lax", maxAge: 7 * 24 * 60 * 60 * 1000, path: "/" });
+  res.cookie("agent_garden_session", token, { httpOnly: true, secure: isProduction, sameSite: "strict", maxAge: 7 * 24 * 60 * 60 * 1000, path: "/" });
+}
+
+function clientAddress(req) {
+  return String(req.ip || req.socket?.remoteAddress || "unknown").slice(0, 120);
+}
+
+function authRateLimit(req, res, next) {
+  const now = Date.now();
+  const key = clientAddress(req);
+  const recent = (authRequestWindows.get(key) || []).filter((timestamp) => timestamp > now - AUTH_WINDOW_MS);
+  if (recent.length >= MAX_AUTH_REQUESTS_PER_WINDOW) return res.status(429).json({ error: "Too many authentication attempts. Please wait and try again." });
+  recent.push(now);
+  authRequestWindows.set(key, recent);
+  next();
+}
+
+function sameOriginGuard(req, res, next) {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+  const origin = req.get("origin");
+  if (!origin) return next();
+  const allowed = new Set([process.env.PUBLIC_ORIGIN, process.env.RENDER_EXTERNAL_URL, `https://${req.get("host")}`].filter(Boolean).map((value) => String(value).replace(/\/$/, "")));
+  if (!allowed.has(origin.replace(/\/$/, ""))) return res.status(403).json({ error: "Cross-origin request blocked." });
+  next();
+}
+
+function validateIncomingFiles(files) {
+  if (!Array.isArray(files)) return [];
+  let total = 0;
+  return files.slice(0, 5).filter((file) => {
+    const mimeType = String(file?.mimeType || "").toLowerCase();
+    const raw = String(file?.data || "").replace(/^data:[^;]+;base64,/, "").replace(/\\s+/g, "");
+    if (!file || !ALLOWED_UPLOAD_TYPES.has(mimeType) || !/^[A-Za-z0-9+/]*={0,2}$/.test(raw) || raw.length % 4 === 1) return false;
+    const size = Math.floor(raw.length * 3 / 4) - (raw.endsWith("==") ? 2 : raw.endsWith("=") ? 1 : 0);
+    if (size < 1 || size > 5 * 1024 * 1024 || total + size > 20 * 1024 * 1024) return false;
+    total += size;
+    return true;
+  });
 }
 
 async function saveRemoteUser(user) {
@@ -352,9 +393,10 @@ app.set("trust proxy", 1);
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 app.use(express.json({ limit: "14mb" }));
 app.use(cookieParser());
+app.use("/api", sameOriginGuard);
 
 function authRequired() {
-  return process.env.AUTH_REQUIRED !== "false";
+  return isProduction || process.env.AUTH_REQUIRED !== "false";
 }
 
 const TEMP_TEST_USER = {
@@ -564,6 +606,10 @@ async function stageUploadedFilesInE2B({ sandbox, sharePath, files = [] }) {
 
 function publishExecutionProgress(id, patch) {
   if (!id) return;
+  if (executionProgress.size >= MAX_PROGRESS_ENTRIES && !executionProgress.has(id)) {
+    const oldest = [...executionProgress.entries()].sort((a, b) => (a[1].updatedAt || 0) - (b[1].updatedAt || 0))[0]?.[0];
+    if (oldest) executionProgress.delete(oldest);
+  }
   const current = executionProgress.get(id) || { stdout: "", stderr: "", phase: "provisioning", startedAt: Date.now() };
   executionProgress.set(id, { ...current, ...patch, updatedAt: Date.now() });
 }
@@ -578,7 +624,7 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
   const startedAt = Date.now();
   let sandbox;
   try {
-    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 300000, allowInternetAccess: process.env.E2B_ALLOW_INTERNET !== "false" });
+    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 300000, allowInternetAccess: process.env.E2B_ALLOW_INTERNET === "true" });
     const extension = normalized.startsWith("python") || normalized === "py" ? "py" : normalized === "bash" || normalized === "sh" ? "sh" : "js";
     const sharePath = executionSharePath(userId);
     const codePath = `${sharePath}/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
@@ -589,7 +635,7 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
     const requestedCommands = Array.isArray(commands) ? commands.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8).map((item) => item.slice(0, 12000)) : [];
     const commandList = requestedCommands.length ? requestedCommands : [scriptCommand];
     const command = commandList.join("\\n");
-    publishExecutionProgress(progressId, { phase: "running", language: normalized, command, commands: commandList, stdout: "", stderr: "", inputFiles: stagedInputFiles, network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled" });
+    publishExecutionProgress(progressId, { userId: String(userId), phase: "running", language: normalized, command, commands: commandList, stdout: "", stderr: "", inputFiles: stagedInputFiles, network: process.env.E2B_ALLOW_INTERNET === "true" ? "internet-enabled" : "internet-disabled" });
     let stdout = "";
     let stderr = "";
     let exitCode = 0;
@@ -618,7 +664,7 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
     let artifactNotice = "";
     const generatedFiles = String(stdout || "").split(/\r?\n/).map((line) => line.match(/^GENERATED_FILE:\s*(.+?)\s*$/)?.[1]).filter(Boolean);
     try { artifacts = await collectE2BArtifacts({ sandbox, userId, codePath, sharePath, generatedFiles }); } catch (artifactError) { artifactNotice = `The code ran, but generated files could not be saved: ${artifactError.message}`; }
-    const finalExecution = { language: normalized, code: String(code), command, commands: commandList, activeCommand: commandList.length, stdout, stderr, exitCode, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled", userFolder: executionUserFolder(userId), inputFiles: stagedInputFiles, artifacts, artifactNotice };
+    const finalExecution = { language: normalized, code: String(code), command, commands: commandList, activeCommand: commandList.length, stdout, stderr, exitCode, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", network: process.env.E2B_ALLOW_INTERNET === "true" ? "internet-enabled" : "internet-disabled", userFolder: executionUserFolder(userId), inputFiles: stagedInputFiles, artifacts, artifactNotice };
     publishExecutionProgress(progressId, { phase: "completed", ...finalExecution });
     if (progressId) setTimeout(() => executionProgress.delete(progressId), 10 * 60 * 1000).unref?.();
     return finalExecution;
@@ -749,7 +795,7 @@ app.get("/api/config", (_req, res) => {
   });
 });
 
-app.post("/api/auth/firebase", async (req, res) => {
+app.post("/api/auth/firebase", authRateLimit, async (req, res) => {
   if (!configured()) {
     return res.status(503).json({ error: "Firebase Authentication or Gemini is not configured on this server." });
   }
@@ -772,7 +818,7 @@ app.post("/api/auth/firebase", async (req, res) => {
   }
 });
 
-app.post("/api/auth/password/signup", async (req, res) => {
+app.post("/api/auth/password/signup", authRateLimit, async (req, res) => {
   if (!process.env.SESSION_SECRET) return res.status(503).json({ error: "Session security is not configured." });
   const email = String(req.body?.email || "").trim().toLowerCase();
   const password = String(req.body?.password || "");
@@ -790,7 +836,7 @@ app.post("/api/auth/password/signup", async (req, res) => {
   } catch (error) { res.status(error.message.includes("already exists") ? 409 : 502).json({ error: error.message }); }
 });
 
-app.post("/api/auth/password/login", async (req, res) => {
+app.post("/api/auth/password/login", authRateLimit, async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const password = String(req.body?.password || "");
   try {
@@ -918,7 +964,9 @@ app.delete("/api/storage/object", requireUser, async (req, res) => {
 app.get("/api/e2b/progress/:id", requireUser, (req, res) => {
   const progress = executionProgress.get(String(req.params.id));
   if (!progress) return res.status(404).json({ error: "Execution progress is no longer available." });
-  res.json(progress);
+  if (progress.userId && String(progress.userId) !== String(req.user.sub)) return res.status(404).json({ error: "Execution progress is no longer available." });
+  const { userId: _userId, ...safeProgress } = progress;
+  res.json(safeProgress);
 });
 
 app.post("/api/e2b/run", requireUser, userRateLimit, async (req, res) => {
@@ -955,7 +1003,7 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
   const message = String(req.body?.message || "").trim();
   const requestedAgentId = typeof req.body?.agentId === "string" ? req.body.agentId : "auto";
   const requestedProvider = req.body?.provider === "pollinations" ? "pollinations" : "gemini";
-  const files = Array.isArray(req.body?.files) ? req.body.files : [];
+  const files = validateIncomingFiles(req.body?.files);
   const { agent, routingReason, casual, execute, generateCode } = resolveAgent(requestedAgentId, message, files);
   if (!message && !files.length) return res.status(400).json({ error: "Write a message or attach a file first." });
   if (message.length > 12000) return res.status(400).json({ error: "Please keep messages under 12,000 characters." });
