@@ -581,7 +581,9 @@ async function callPollinations({ agent, message, history, files }) {
     signal: AbortSignal.timeout(45000),
   });
   if (response.status === 402 || response.status === 429) {
-    throw new Error("Pollinations' anonymous queue is currently full. Wait briefly and retry, or switch back to Gemini.");
+    const error = new Error("Pollinations' anonymous queue is currently full.");
+    error.code = "POLLINATIONS_QUEUE_FULL";
+    throw error;
   }
   if (!response.ok) throw new Error(`Pollinations fallback returned ${response.status}.`);
   const body = await response.json();
@@ -855,14 +857,24 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
         result = { answer: `## E2B execution\n\nI ran the ${execution.language} code in the Agent Garden sandbox.\n\n${fence}${execution.language}\n${execution.code}\n${fence}\n\n### Output\n\n${fence}text\n${output || "(no output)"}\n${fence}${artifactText}`, provider: "E2B", sources: [], execution };
       }
     } else if (requestedProvider === "pollinations") {
-      result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files });
+      try {
+        result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files });
+      } catch (pollinationsError) {
+        if (files.length || pollinationsError.code !== "POLLINATIONS_QUEUE_FULL") throw pollinationsError;
+        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files });
+        result.fallbackReason = "Pollinations’ anonymous queue was full, so this reply was completed by Gemini automatically.";
+      }
     } else {
       try {
         result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files });
       } catch (geminiError) {
         if (files.length) throw geminiError;
-        result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files });
-        result.fallbackReason = "Gemini was unavailable, so this reply came from the lightweight fallback.";
+        try {
+          result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files });
+          result.fallbackReason = "Gemini was unavailable, so this reply came from the lightweight fallback.";
+        } catch (pollinationsError) {
+          throw geminiError;
+        }
       }
     }
     const responsePayload = { ...result, agent: agent.id, routingReason, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
