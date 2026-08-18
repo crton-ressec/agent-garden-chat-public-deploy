@@ -1176,6 +1176,18 @@ app.post("/api/connectors", requireUser, enforceActiveAccount, async (req, res) 
     res.status(201).json({ ok: true, connector: { id, name: String(body.name).trim(), kind, baseUrl: parsed.href, enabled: body.enabled !== false, secretConfigured: Boolean(body.secret) } });
   } catch (error) { res.status(400).json({ error: error.message || "Could not save connector." }); }
 });
+app.post("/api/connectors/:id/test", requireUser, enforceActiveAccount, async (req, res) => {
+  try {
+    const data = await d1RequestWithRetry(`/v1/connectors/${encodeURIComponent(String(req.user.sub))}`);
+    const connector = (data?.connectors || []).find((item) => item.id === req.params.id && item.enabled);
+    if (!connector) return res.status(404).json({ error: "Enabled connector not found." });
+    const parsed = new URL(connector.base_url); if (isBlockedHost(parsed.hostname)) return res.status(400).json({ error: "Private or local connector hosts are not allowed." });
+    const secret = unseal(connector.secret_ciphertext);
+    const headers = { Accept: "application/json, text/plain, */*" }; if (secret && connector.auth_header) headers[connector.auth_header] = /^authorization$/i.test(connector.auth_header) ? `Bearer ${secret}` : secret;
+    const response = connector.kind === "mcp" ? await fetch(parsed.href, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: `health_${Date.now()}`, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "agent-garden", version: "1.0" } } }), signal: AbortSignal.timeout(12000) }) : await fetch(parsed.href, { headers, signal: AbortSignal.timeout(12000) });
+    res.json({ ok: response.ok, status: response.status, connector: connector.name, message: response.ok ? "Connector responded successfully." : `Connector responded with HTTP ${response.status}.` });
+  } catch (error) { res.status(502).json({ error: `Connector test failed: ${error.message}` }); }
+});
 app.patch("/api/connectors/:id", requireUser, enforceActiveAccount, async (req, res) => {
   try {
     const body = req.body || {}; const patch = { userId: req.user.sub };
