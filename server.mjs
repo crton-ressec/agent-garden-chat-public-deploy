@@ -46,7 +46,7 @@ const storage = STORAGE_READY ? new S3Client({ region: STORAGE_REGION, endpoint:
 const E2B_READY = Boolean(process.env.E2B_API_KEY);
 const executionProgress = new Map();
 const MAX_STORAGE_FILE_BYTES = 25 * 1024 * 1024;
-const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "application/pdf", "application/json", "text/csv", "text/javascript", "application/javascript", "application/typescript", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif"]);
+const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "text/csv", "text/xml", "text/javascript", "text/x-python", "text/x-sh", "application/pdf", "application/json", "application/xml", "application/zip", "application/x-zip-compressed", "application/gzip", "application/x-gzip", "application/x-tar", "application/octet-stream", "application/javascript", "application/typescript", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"]);
 
 function safeObjectName(name) {
   return path.basename(String(name || "file")).replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 140) || "file";

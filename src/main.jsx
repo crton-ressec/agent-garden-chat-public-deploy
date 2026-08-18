@@ -735,7 +735,7 @@ function App() {
               />
               <div className="composer-toolbar">
                 <div className="composer-tools">
-                  <input ref={fileInputRef} className="hidden-input" type="file" multiple onChange={handleFiles} accept=".txt,.md,.pdf,.doc,.docx,.csv,.json,.js,.jsx,.ts,.tsx,.py,.html,.css,image/*" />
+                  <input ref={fileInputRef} className="hidden-input" type="file" multiple onChange={handleFiles} accept=".txt,.md,.pdf,.doc,.docx,.csv,.json,.xml,.js,.jsx,.mjs,.ts,.tsx,.py,.sh,.html,.css,.svg,.xls,.xlsx,.zip,.tar,.gz,image/*" />
                   <button className="tool-button" onClick={() => fileInputRef.current?.click()} disabled={!user || sending} title="Add files"><Paperclip size={18} /></button>
                   <button className="tool-button" onClick={() => setE2bOpen(true)} disabled={!user || sending} title="Run code in E2B"><Route size={18} /></button>
                   <div className="provider-select"><span className={`status-dot ${provider}`} /><select value={provider} onChange={(event) => setProvider(event.target.value)} disabled={!user || sending}><option value="gemini">Gemini (automatic fallback)</option><option value="pollinations">Pollinations only</option></select></div>
