@@ -267,21 +267,28 @@ function App() {
         if (activeEffect) setNotice(error.message || "Firebase Sign-In could not be completed.");
       }
     };
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => { updateDiagnostics({ stage: "auth-state-listener", authStateListener: firebaseUser ? "user-received" : "null-received", listenerUserPresent: Boolean(firebaseUser) }); exchangeFirebaseUser(firebaseUser); });
     (async () => {
       try {
-        updateDiagnostics({ stage: "waiting-for-firebase", configLoaded: true, persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, redirectPendingMarker: sessionStorage.getItem("agent_garden_redirect_pending") === "1", clientState: await inspectClientState() });
+        const redirectPending = sessionStorage.getItem("agent_garden_redirect_pending") === "1";
+        updateDiagnostics({ stage: "waiting-for-firebase", configLoaded: true, persistenceRequested: "browserLocalPersistence", currentUrl: window.location.origin + window.location.pathname, redirectPendingMarker: redirectPending, clientState: await inspectClientState() });
         await auth.authStateReady();
-        const redirectResult = await getRedirectResult(auth);
+        let redirectResult = await getRedirectResult(auth);
+        if (!redirectResult?.user && !auth.currentUser && redirectPending) {
+          updateDiagnostics({ stage: "redirect-result-empty-retrying" });
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          redirectResult = await getRedirectResult(auth);
+        }
         updateDiagnostics({ stage: redirectResult?.user || auth.currentUser ? "redirect-result-found" : "redirect-result-empty", redirectResult: { userReturned: Boolean(redirectResult?.user), credentialPresent: Boolean(redirectResult?.credential), operationType: redirectResult?.operationType || null }, currentUserPresent: Boolean(auth.currentUser), afterAuthStateReady: await inspectClientState() });
         sessionStorage.removeItem("agent_garden_redirect_pending");
         if (redirectResult?.user) await exchangeFirebaseUser(redirectResult.user, "redirect-result");
         else if (auth.currentUser) await exchangeFirebaseUser(auth.currentUser, "current-user");
+        else if (redirectPending && activeEffect) setNotice("Google returned, but the browser did not restore the Firebase session. Try Google sign-in again or use the diagnostic details below.");
       } catch (error) {
         updateDiagnostics({ stage: "redirect-processing-error", error: safeError(error) });
         if (activeEffect) setNotice(error.message || "Firebase redirect sign-in could not be completed.");
       }
     })();
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => { updateDiagnostics({ authStateListener: firebaseUser ? "user-received" : "null-received", listenerUserPresent: Boolean(firebaseUser) }); exchangeFirebaseUser(firebaseUser); });
     return () => { activeEffect = false; unsubscribe(); };
   }, [config.firebaseConfig?.apiKey]);
 
