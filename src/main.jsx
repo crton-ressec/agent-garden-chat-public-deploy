@@ -157,6 +157,9 @@ function App() {
   const [filesOpen, setFilesOpen] = useState(false);
   const [filesLoading, setFilesLoading] = useState(false);
   const [chatId, setChatId] = useState(null);
+  const [chatTitle, setChatTitle] = useState("New conversation");
+  const [recentChats, setRecentChats] = useState([]);
+  const [recentChatsLoading, setRecentChatsLoading] = useState(false);
   const [chatExecutionLive, setChatExecutionLive] = useState(null);
   const [e2bOpen, setE2bOpen] = useState(false);
   const [e2bLanguage, setE2bLanguage] = useState("python");
@@ -305,6 +308,37 @@ function App() {
 
   useEffect(() => { if (userId) loadWorkspaceFiles(); }, [userId, loadWorkspaceFiles]);
 
+  const loadRecentChats = useCallback(async () => {
+    if (!userId) return;
+    setRecentChatsLoading(true);
+    try {
+      const response = await fetch(`/api/chats?client=${Date.now()}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not load recent conversations.");
+      setRecentChats(Array.isArray(data.chats) ? data.chats : []);
+    } catch (error) { setNotice(error.message); }
+    finally { setRecentChatsLoading(false); }
+  }, [userId]);
+
+  useEffect(() => { if (userId) loadRecentChats(); }, [userId, loadRecentChats]);
+
+  async function openRecentChat(chat) {
+    if (!chat?.id || sending) return;
+    try {
+      const response = await fetch(`/api/chats/${encodeURIComponent(chat.id)}?client=${Date.now()}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not open that conversation.");
+      const normalized = (data.messages || []).map((item) => ({ id: item.id, role: item.role, content: item.content, agent: item.agent_id || "coordinator", provider: item.provider || "gemini", createdAt: item.created_at ? formatTime(new Date(item.created_at)) : formatTime() }));
+      setChatId(chat.id);
+      setChatTitle(chat.title || "New conversation");
+      setMessages(normalized);
+      setFiles([]);
+      setAgentLog([]);
+      setNotice("");
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    } catch (error) { setNotice(error.message); }
+  }
+
   useEffect(() => {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -399,6 +433,7 @@ function App() {
     setNotice("");
     sessionStorage.removeItem(STORAGE_KEY);
     setChatId(null);
+    setChatTitle("New conversation");
     inputRef.current?.focus();
   }
 
@@ -566,7 +601,9 @@ function App() {
       const data = await result.json();
       if (!result.ok) throw new Error(data.error || "The provider did not return an answer.");
       if (data.chatId) setChatId(data.chatId);
+      if (!chatId) setChatTitle(data.chatTitle || message.slice(0, 60) || "New conversation");
       if (data.persistenceNotice) setNotice(data.persistenceNotice);
+      loadRecentChats();
       if (data.execution) setChatExecutionLive((current) => ({ ...(current || {}), ...data.execution, active: false, phase: data.execution.status === "awaiting_code" ? "awaiting_code" : "completed", elapsed: Math.round((data.execution.durationMs || 0) / 1000) }));
       setMessages((current) => [...current, {
         id: crypto.randomUUID(),
@@ -611,8 +648,10 @@ function App() {
         <button className="files-nav-button" onClick={() => { setFilesOpen(true); loadWorkspaceFiles(); }}><Files size={18} />{railOpen && <span>Workspace files</span>}<span className="files-count">{workspaceFiles.length || ""}</span></button>
         {railOpen && <>
           <div className="rail-section-label">Recent</div>
-          <button className="recent-chat active"><span className="recent-dot" />Multi-agent workspace<span className="recent-menu"><MoreHorizontal size={16} /></span></button>
-          <div className="rail-footnote">Chats and attachments stay in this browser session.</div>
+          {recentChatsLoading && <div className="rail-footnote">Loading conversations…</div>}
+          {!recentChatsLoading && recentChats.length === 0 && <div className="rail-footnote">Your conversations will appear here.</div>}
+          {!recentChatsLoading && recentChats.slice(0, 12).map((chat) => <button key={chat.id} className={`recent-chat ${chat.id === chatId ? "active" : ""}`} onClick={() => openRecentChat(chat)} title={chat.title || "New conversation"}><span className="recent-dot" /><span className="recent-chat-title">{chat.title || "New conversation"}</span><span className="recent-menu"><MoreHorizontal size={16} /></span></button>)}
+          <div className="rail-footnote">Chats are saved securely to your account.</div>
         </>}
         <div className="rail-spacer" />
         {railOpen && <button className="settings-link"><Settings2 size={17} />Workspace settings</button>}
@@ -626,7 +665,7 @@ function App() {
       <main className="workspace">
         <header className="topbar">
           <button className="mobile-menu icon-button" onClick={() => setRailOpen(!railOpen)}><Menu size={20} /></button>
-          <div className="workspace-title"><span>Agent Garden</span><span className="title-divider">/</span><span className="muted-title">New conversation</span>{!config.authRequired && <span className="test-mode-badge">Temporary test mode</span>}</div>
+          <div className="workspace-title"><span>Agent Garden</span><span className="title-divider">/</span><span className="muted-title">{chatTitle}</span>{!config.authRequired && <span className="test-mode-badge">Temporary test mode</span>}</div>
           <div className="topbar-actions">
             <button className="topbar-action"><Search size={17} /><span>Search</span></button>
             <button className="icon-button"><MoreHorizontal size={20} /></button>

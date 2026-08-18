@@ -60,6 +60,12 @@ function executionSharePath(userId) {
   return `/tmp/agent-garden-users/${executionUserFolder(userId)}/workspace`;
 }
 
+function conversationTitle(message) {
+  const cleaned = String(message || "").replace(/```[\s\S]*?```/g, "code request").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "New conversation";
+  return cleaned.length > 60 ? `${cleaned.slice(0, 57).trimEnd()}…` : cleaned;
+}
+
 function requireStorage(res) {
   if (!STORAGE_READY || !storage) { res.status(503).json({ error: `${STORAGE_PROVIDER === "tigris" ? "Tigris" : "Object storage"} is not configured on the server yet.` }); return false; }
   return true;
@@ -789,6 +795,22 @@ app.post("/api/auth/logout", (_req, res) => {
   res.status(204).end();
 });
 
+app.get("/api/chats", requireUser, async (req, res) => {
+  try {
+    const data = await d1Request(`/v1/chats/user/${encodeURIComponent(req.user.sub)}`);
+    res.json({ chats: Array.isArray(data?.chats) ? data.chats : [] });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not load recent chats." }); }
+});
+
+app.get("/api/chats/:chatId", requireUser, async (req, res) => {
+  try {
+    const chatData = await d1Request(`/v1/chats/${encodeURIComponent(req.params.chatId)}`);
+    if (!chatData?.chat || String(chatData.chat.user_id) !== String(req.user.sub)) return res.status(404).json({ error: "Chat not found." });
+    const messageData = await d1Request(`/v1/messages/${encodeURIComponent(req.params.chatId)}`);
+    res.json({ chat: chatData.chat, messages: Array.isArray(messageData?.messages) ? messageData.messages : [] });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not load the conversation." }); }
+});
+
 app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
   const message = String(req.body?.message || "").trim();
   const requestedAgentId = typeof req.body?.agentId === "string" ? req.body.agentId : "auto";
@@ -839,8 +861,9 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
     const responsePayload = { ...result, agent: agent.id, routingReason, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
     const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
     responsePayload.chatId = chatId;
+    responsePayload.chatTitle = conversationTitle(message);
     try {
-      await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: req.user.sub, title: message.slice(0, 80) || "New chat", agentId: agent.id, provider: result.provider }) });
+      await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: req.user.sub, title: conversationTitle(message), agentId: agent.id, provider: result.provider }) });
       await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "user", content: message, agentId: agent.id, provider: requestedProvider, metadata: { files: files.map((file) => ({ name: file.name, storageKey: file.storageKey || null, size: file.size || null, mimeType: file.mimeType || null })) } }) });
       await d1RequestWithRetry("/v1/messages", {
         method: "POST",
