@@ -67,8 +67,11 @@ function safeObjectName(name) {
   return path.basename(String(name || "file")).replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 140) || "file";
 }
 
-function sanitizeAssistantContent(content) {
-  return String(content || "")
+function sanitizeAssistantContent(content, artifacts = []) {
+  let text = String(content || "");
+  const byName = new Map((Array.isArray(artifacts) ? artifacts : []).map((artifact) => [safeObjectName(artifact?.name), artifact?.url]).filter(([, url]) => url));
+  text = text.replace(/https?:\/\/agent-garden\.internal\/files\/([^\s)`]+)/gi, (_match, encodedName) => byName.get(safeObjectName(decodeURIComponent(encodedName))) || "the generated file");
+  return text
     .replace(/\[([^\]]+)\]\((?:sandbox:)?(?:\/|%2F)[^)]+\)/gi, "$1")
     .replace(/sandbox:(?:\/|%2F)[^\s)`]+/gi, "the generated file")
     .replace(/(?:\/tmp\/agent-garden-users\/|\/home\/user\/|\/home\/ubuntu\/)[^\s)`]+/gi, "the generated file");
@@ -879,7 +882,7 @@ function availabilityFallbackResult(message) {
   };
 }
 
-async function callGemini({ agent, message, history, files, systemContext = "" }) {
+async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false }) {
   if (!gemini) throw new Error("Gemini is not configured on the server.");
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
   const contents = [
@@ -909,8 +912,14 @@ async function callGemini({ agent, message, history, files, systemContext = "" }
     response = await generate(agent.search ? { ...config, tools: [{ googleSearch: {} }] } : config);
   } catch (groundingError) {
     if (!agent.search) throw normalizedGeminiError(groundingError);
+    if (!liveSourcesAvailable) {
+      const error = new Error("Live web search could not be completed. No current-source answer was generated.");
+      error.code = "LIVE_SEARCH_UNAVAILABLE";
+      error.cause = groundingError;
+      throw error;
+    }
     response = await generate(config);
-    researchNotice = "Google Search grounding was unavailable for this reply, so the answer was generated without live web sources.";
+    researchNotice = "Google grounding was unavailable; the answer below uses server-fetched live sources.";
   }
   const answer = response.text?.trim();
   if (!answer) throw new Error("Gemini returned an empty response.");
@@ -1348,7 +1357,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       } catch (pollinationsError) {
         if (files.length || pollinationsError.code !== "POLLINATIONS_QUEUE_FULL") throw pollinationsError;
         try {
-          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext });
+          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext) });
           result.fallbackReason = "Pollinations’ anonymous queue was full, so this reply was completed by Gemini automatically.";
         } catch (geminiError) {
           if (geminiError.code !== "GEMINI_TRANSIENT_UNAVAILABLE") throw geminiError;
@@ -1357,20 +1366,24 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       }
     } else {
       try {
-        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext });
+        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext) });
       } catch (geminiError) {
-        if (files.length) throw geminiError;
-        try {
-          result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext });
-          result.fallbackReason = "Gemini was unavailable, so this reply came from the lightweight fallback.";
-        } catch (pollinationsError) {
-          if (isTransientGeminiError(geminiError) || pollinationsError.code === "POLLINATIONS_QUEUE_FULL") {
-            result = availabilityFallbackResult("Gemini and Pollinations were temporarily unavailable.");
-          } else throw geminiError;
+        if (agent.search && geminiError.code === "LIVE_SEARCH_UNAVAILABLE") {
+          result = { answer: "I couldn’t retrieve live web sources for this request, so I’m not going to present a potentially outdated answer. Please retry or configure a search connector in Workspace Connectors.", provider: "Research unavailable", sources: [], researchNotice: "Live search failed; no stale knowledge-cutoff answer was generated." };
+        } else {
+          if (files.length) throw geminiError;
+          try {
+            result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext });
+            result.fallbackReason = "Gemini was unavailable, so this reply came from the lightweight fallback.";
+          } catch (pollinationsError) {
+            if (isTransientGeminiError(geminiError) || pollinationsError.code === "POLLINATIONS_QUEUE_FULL") {
+              result = availabilityFallbackResult("Gemini and Pollinations were temporarily unavailable.");
+            } else throw geminiError;
+          }
         }
       }
     }
-    result.answer = sanitizeAssistantContent(result.answer);
+    result.answer = sanitizeAssistantContent(result.answer, result.execution?.artifacts || []);
     if (result.execution?.artifacts?.length) {
       result.execution.artifacts = result.execution.artifacts.filter((artifact) => artifact?.key && String(artifact.key).startsWith(`users/${encodeURIComponent(String(req.user.sub))}/`));
       if (isArchiveOnlyRequest(message)) {
