@@ -490,7 +490,7 @@ async function generateExecutionCode({ message, language = "python", userId, his
   const sharePath = executionSharePath(userId);
   const response = await gemini.models.generateContent({
     model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
-    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. If the request asks to make, create, or package files—especially a ZIP or archive—write the complete creation script yourself; do not wait for the user to paste code. For ZIPs, create the requested test files, package them into a clearly named `.zip`, and print \`GENERATED_FILE: archive-name.zip\`. Save generated visual or data artifacts under ${sharePath} or the current working directory. Print every generated filename on its own line using \`GENERATED_FILE: filename\` so the host artifact finalizer can upload exactly those files before cleanup. Do not print absolute paths. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
+    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. If the request asks to make, create, write, generate, or package any file or files—whether a ZIP, PDF, CSV, JSON, image, document, spreadsheet, script, or archive—write the complete creation script yourself; do not wait for the user to paste code. Create every requested output with a clear filename and print one \`GENERATED_FILE: filename\` marker per output. For ZIPs, create the requested test files and package them into a clearly named archive. Save generated visual or data artifacts under ${sharePath} or the current working directory. Print every generated filename on its own line using \`GENERATED_FILE: filename\` so the host artifact finalizer can upload exactly those files before cleanup. Do not print absolute paths. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
     config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only. Never create or print sandbox:/ links or expose absolute internal filesystem paths; print filenames only. The host will upload printed/generated filenames to persistent storage, assign file IDs, index them, and provide links after the terminal finishes.`, temperature: 0.15, maxOutputTokens: 5000 },
   });
   const raw = response.text?.trim() || "";
@@ -500,15 +500,17 @@ async function generateExecutionCode({ message, language = "python", userId, his
 
 function artifactContentType(name) {
   const extension = String(name).toLowerCase().split(".").pop();
-  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", pdf: "application/pdf", csv: "text/csv", json: "application/json", txt: "text/plain", md: "text/markdown", html: "text/html", css: "text/css", js: "text/javascript", py: "text/x-python" })[extension] || "application/octet-stream";
+  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", pdf: "application/pdf", csv: "text/csv", json: "application/json", txt: "text/plain", md: "text/markdown", html: "text/html", css: "text/css", js: "text/javascript", mjs: "text/javascript", py: "text/x-python", sh: "application/x-sh", zip: "application/zip", gz: "application/gzip", tar: "application/x-tar", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })[extension] || "application/octet-stream";
 }
 
 async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath, generatedFiles = [] }) {
   if (!storage || !STORAGE_READY) return [];
   const requestedNames = new Set((Array.isArray(generatedFiles) ? generatedFiles : []).map((name) => safeObjectName(name)).filter(Boolean));
   const scan = await sandbox.commands.run(`find '${sharePath}' -type f -mmin -5 -size -10M ! -path '${codePath}' 2>/dev/null | head -40`, { timeoutMs: 10000 });
-  const discovered = String(scan.stdout || "").split("\\n").map((value) => value.trim()).filter((value) => value && value !== codePath && !value.endsWith(".py") && !value.endsWith(".js") && !value.endsWith(".sh"));
-  const paths = requestedNames.size ? discovered.filter((value) => requestedNames.has(safeObjectName(path.basename(value)))) : discovered;
+  const discovered = String(scan.stdout || "").split("\\n").map((value) => value.trim()).filter((value) => value && value !== codePath);
+  const paths = requestedNames.size
+    ? discovered.filter((value) => requestedNames.has(safeObjectName(path.basename(value))))
+    : discovered.filter((value) => !value.endsWith(".py") && !value.endsWith(".js") && !value.endsWith(".sh"));
   const artifacts = [];
   for (const artifactPath of paths.slice(0, 8)) {
     const name = safeObjectName(path.basename(artifactPath));
