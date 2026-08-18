@@ -92,11 +92,26 @@ async function d1Request(pathname, options = {}) {
 
 async function d1RequestWithRetry(pathname, options = {}) {
   let lastError;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     try { return await d1Request(pathname, options); }
-    catch (error) { lastError = error; if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250)); }
+    catch (error) {
+      lastError = error;
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 250 * (2 ** attempt)));
+    }
   }
   throw lastError;
+}
+
+async function persistChatTurn({ chatId, userId, title, agentId, provider, requestedProvider, userContent, userMetadata, assistantContent, assistantMetadata }) {
+  const payload = { chatId, userId, title, agentId, provider, requestedProvider, userContent, userMetadata, assistantContent, assistantMetadata };
+  try {
+    return await d1RequestWithRetry("/v1/turn", { method: "POST", body: JSON.stringify(payload) });
+  } catch (turnError) {
+    console.warn("Atomic D1 turn persistence unavailable; falling back to individual writes:", turnError.message);
+    await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId, title, agentId, provider }) });
+    await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId, role: "user", content: userContent, agentId, provider: requestedProvider, metadata: userMetadata }) });
+    return await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId, role: "assistant", content: assistantContent, agentId, provider, metadata: assistantMetadata }) });
+  }
 }
 
 async function indexWorkspaceArtifacts(userId, artifacts, content = "Workspace artifact") {
@@ -936,11 +951,17 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
     responsePayload.chatId = chatId;
     responsePayload.chatTitle = conversationTitle(message);
     try {
-      await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: req.user.sub, title: conversationTitle(message), agentId: agent.id, provider: result.provider }) });
-      await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "user", content: message, agentId: agent.id, provider: requestedProvider, metadata: { files: files.map((file) => ({ name: file.name, storageKey: file.storageKey || null, size: file.size || null, mimeType: file.mimeType || null })) } }) });
-      await d1RequestWithRetry("/v1/messages", {
-        method: "POST",
-        body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId: req.user.sub, role: "assistant", content: result.answer, agentId: agent.id, provider: result.provider, metadata: { sources: result.sources || [], artifacts: result.execution?.artifacts || result.artifacts || [] } }),
+      await persistChatTurn({
+        chatId,
+        userId: req.user.sub,
+        title: conversationTitle(message),
+        agentId: agent.id,
+        provider: result.provider,
+        requestedProvider,
+        userContent: message,
+        userMetadata: { files: files.map((file) => ({ name: file.name, storageKey: file.storageKey || null, size: file.size || null, mimeType: file.mimeType || null })) },
+        assistantContent: result.answer,
+        assistantMetadata: { sources: result.sources || [], artifacts: result.execution?.artifacts || result.artifacts || [] },
       });
       responsePayload.persistenceStatus = "saved";
     } catch (persistError) {
