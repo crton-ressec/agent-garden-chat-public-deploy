@@ -227,6 +227,10 @@ function authRateLimit(req, res, next) {
 }
 
 async function firebaseAuthHelperProxy(req, res) {
+  if (req.originalUrl.startsWith("/__/firebase/init.json") && req.method === "GET") {
+    const publicOrigin = String(process.env.FIREBASE_CLIENT_AUTH_DOMAIN || process.env.PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || `https://${req.get("host") || ""}`).replace(/^https?:\/\//, "").replace(/\/$/, "");
+    return res.type("application/json").json({ apiKey: process.env.FIREBASE_API_KEY || "", authDomain: publicOrigin, projectId: process.env.FIREBASE_PROJECT_ID || "", storageBucket: process.env.FIREBASE_STORAGE_BUCKET || "", messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "", appId: process.env.FIREBASE_APP_ID || "" });
+  }
   const helperOrigin = String(process.env.FIREBASE_HELPER_ORIGIN || `https://${process.env.FIREBASE_AUTH_DOMAIN || "agentic-garden.firebaseapp.com"}`).replace(/\/$/, "");
   const target = `${helperOrigin}${req.originalUrl}`;
   try {
