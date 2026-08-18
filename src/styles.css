@@ -151,6 +151,16 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .execution-artifacts a span { margin-left: auto; color: #79869a; font-size: 9px; }
 @keyframes terminalBlink { 50% { opacity: 0; } }
 
+.admin-recovery-card { display: grid; gap: 10px; margin: 18px 0; padding: 14px; border: 1px solid #3a4255; border-radius: 12px; background: #1d222d; }
+.admin-recovery-card > div:first-child { display: grid; gap: 4px; }
+.admin-recovery-card strong { color: #e6ebf6; font-size: 12px; }
+.admin-recovery-card small { color: #9da7ba; font-size: 10px; line-height: 1.5; }
+.admin-recovery-card .secondary-auth-button { width: auto; min-height: 36px; }
+.admin-password-form { display: grid; gap: 9px; padding-top: 4px; }
+.admin-password-form label { display: grid; gap: 5px; color: #aab4c6; font-size: 10px; font-weight: 700; }
+.admin-password-form input { width: 100%; border: 1px solid #3e4658; border-radius: 8px; background: #11151d; color: #e9eef8; padding: 9px 10px; font-size: 12px; outline: none; }
+.admin-password-form input:focus { border-color: #8294cf; }
+.admin-password-form .firebase-button { width: auto; min-height: 38px; }
 .admin-moderation-launcher { position: fixed; right: 18px; bottom: 82px; z-index: 18; width: auto; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 12px; border: 1px solid #59698f; border-radius: 999px; background: rgba(28, 34, 49, .94); color: #dce5ff; box-shadow: 0 8px 24px rgba(0,0,0,.28); font-size: 11px; font-weight: 800; cursor: pointer; }
 .admin-moderation-launcher:hover { background: #354264; transform: translateY(-1px); }
 .admin-moderation-launcher:disabled { opacity: .7; cursor: wait; }

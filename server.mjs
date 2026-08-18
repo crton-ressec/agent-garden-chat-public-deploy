@@ -970,6 +970,15 @@ app.post("/api/admin/retention/run", requireUser, requireAdmin, async (req, res)
   try { res.json(await d1Request("/v1/admin/retention/run", { method: "POST", body: JSON.stringify({ adminUserId: req.user.sub }) })); }
   catch (error) { res.status(502).json({ error: error.message || "Could not run retention." }); }
 });
+app.post("/api/admin/password", requireUser, requireAdmin, async (req, res) => {
+  const password = String(req.body?.password || "");
+  if (password.length < 12) return res.status(400).json({ error: "Use an admin password of at least 12 characters." });
+  try {
+    const salt = randomBytes(16).toString("hex");
+    const passwordHash = hashPassword(password, salt);
+    res.json(await d1Request("/v1/admin/password", { method: "POST", body: JSON.stringify({ adminUserId: req.user.sub, targetEmail: ADMIN_EMAIL, passwordSalt: salt, passwordHash }) }));
+  } catch (error) { res.status(502).json({ error: error.message || "Could not update the admin password." }); }
+});
 
 app.post("/api/storage/presign", requireUser, enforceActiveAccount, async (req, res) => {
   if (!requireStorage(res)) return;
