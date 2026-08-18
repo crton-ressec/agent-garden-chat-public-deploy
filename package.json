@@ -10,6 +10,7 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "@auth0/auth0-react": "^2.24.1",
     "@aws-sdk/client-s3": "^3.1111.0",
     "@aws-sdk/s3-request-presigner": "^3.1111.0",
     "@google/genai": "^1.25.0",
@@ -20,6 +21,7 @@
     "express-openid-connect": "^3.4.0",
     "firebase": "^12.7.0",
     "helmet": "^8.0.0",
+    "jose": "^6.2.9",
     "jsonwebtoken": "^9.0.2"
   },
   "overrides": {

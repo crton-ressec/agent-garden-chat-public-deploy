@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Auth0Provider, useAuth0 } from "@auth0/auth0-react";
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { browserLocalPersistence, getAuth, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, setPersistence, signInWithRedirect, signOut as firebaseSignOut } from "firebase/auth";
 import {
@@ -128,7 +129,8 @@ function PreviewText({ text }) {
 }
 
 function App() {
-  const [config, setConfig] = useState({ agents: [], firebaseConfig: {}, configured: false, authRequired: true, testUser: null });
+  const { isLoading: auth0Loading, isAuthenticated: auth0Authenticated, user: auth0User, getIdTokenClaims, loginWithRedirect, logout: auth0Logout } = useAuth0();
+  const [config, setConfig] = useState({ agents: [], firebaseConfig: {}, configured: false, authRequired: true, authMode: "auth0", auth0Ready: true, testUser: null });
   const [user, setUser] = useState(null);
   const [activeAgent, setActiveAgent] = useState("auto");
   const [provider, setProvider] = useState("gemini");
@@ -216,6 +218,24 @@ function App() {
     }
   }, [fetchConfig]);
 
+  useEffect(() => {
+    if (config.authMode !== "auth0" || auth0Loading || !auth0Authenticated) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const claims = await getIdTokenClaims();
+        const idToken = claims?.__raw;
+        if (!idToken) throw new Error("Auth0 did not return an ID token.");
+        const response = await fetch("/api/auth/auth0", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ idToken }) });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || "Auth0 session exchange failed.");
+        if (!cancelled) setUser(data.user || null);
+      } catch (error) {
+        if (!cancelled) setNotice(error.message || "Auth0 session exchange failed.");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [config.authMode, auth0Loading, auth0Authenticated, auth0User, getIdTokenClaims]);
   useEffect(() => {
     if (config.authMode === "auth0" || !config.authRequired || !config.firebaseConfig?.apiKey) return undefined;
     let activeEffect = true;
@@ -413,7 +433,7 @@ function App() {
     setNotice("");
     try {
       if (config.authMode === "auth0") {
-        window.location.assign("/login?returnTo=/");
+        await loginWithRedirect({ authorizationParams: { redirect_uri: window.location.origin } });
         return;
       }
       if (!config.firebaseConfig?.apiKey) throw new Error("Google sign-in is not configured on this server.");
@@ -507,7 +527,8 @@ function App() {
 
   async function logout() {
     if (config.authMode === "auth0") {
-      window.location.assign("/logout");
+      await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+      await auth0Logout({ logoutParams: { returnTo: window.location.origin } });
       return;
     }
     try {
@@ -843,4 +864,8 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(
+  <Auth0Provider domain="agentoz.ca.auth0.com" clientId="id6UjCuq59L70nWa0pkFg8irQzcTV4ot" authorizationParams={{ redirect_uri: window.location.origin }}>
+    <App />
+  </Auth0Provider>,
+);
