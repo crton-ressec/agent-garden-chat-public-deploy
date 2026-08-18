@@ -510,7 +510,7 @@ async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath, gener
   if (!storage || !STORAGE_READY) return [];
   const requestedNames = new Set((Array.isArray(generatedFiles) ? generatedFiles : []).map((name) => safeObjectName(name)).filter(Boolean));
   const scan = await sandbox.commands.run(`find '${sharePath}' -type f -mmin -5 -size -10M ! -path '${codePath}' 2>/dev/null | head -40`, { timeoutMs: 10000 });
-  const discovered = String(scan.stdout || "").split("\\n").map((value) => value.trim()).filter((value) => value && value !== codePath);
+  const discovered = String(scan.stdout || "").split(/\r?\n/).map((value) => value.trim()).filter((value) => value && value !== codePath);
   const paths = requestedNames.size
     ? [...requestedNames].map((name) => `${sharePath}/${name}`)
     : discovered.filter((value) => !value.endsWith(".py") && !value.endsWith(".js") && !value.endsWith(".sh"));
@@ -518,15 +518,9 @@ async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath, gener
   const failures = [];
   for (const artifactPath of paths.slice(0, 12)) {
     const name = safeObjectName(path.basename(artifactPath));
-    const quotedPath = "'" + artifactPath.replaceAll("'", "'\\\\''") + "'";
     try {
-      const exists = await sandbox.commands.run(`test -f ${quotedPath}`, { timeoutMs: 10000 });
-      if (exists.exitCode && exists.exitCode !== 0) { failures.push(`${name}: file was not found in the E2B workspace`); continue; }
-      let encoded;
-      try { encoded = await sandbox.commands.run(`base64 -w 0 ${quotedPath}`, { timeoutMs: 30000 }); }
-      catch { encoded = await sandbox.commands.run(`base64 ${quotedPath}`, { timeoutMs: 30000 }); }
-      if (encoded.exitCode && encoded.exitCode !== 0) { failures.push(`${name}: base64 read failed with exit status ${encoded.exitCode}`); continue; }
-      const body = Buffer.from(String(encoded.stdout || "").replace(/\\s+/g, ""), "base64");
+      const bytes = await sandbox.files.read(artifactPath, { format: "bytes" });
+      const body = Buffer.from(bytes);
       if (!body.length || body.length > 10 * 1024 * 1024) { failures.push(`${name}: empty or oversized file`); continue; }
       const fileId = `file_${randomBytes(12).toString("hex")}`;
       const key = `users/${encodeURIComponent(userId)}/files/${fileId}-${name}`;
@@ -622,7 +616,7 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
     publishExecutionProgress(progressId, { phase: "finalizing", stdout, stderr, exitCode });
     let artifacts = [];
     let artifactNotice = "";
-    const generatedFiles = String(stdout || "").split("\\n").map((line) => line.match(/^GENERATED_FILE:\s*(.+?)\s*$/)?.[1]).filter(Boolean);
+    const generatedFiles = String(stdout || "").split(/\r?\n/).map((line) => line.match(/^GENERATED_FILE:\s*(.+?)\s*$/)?.[1]).filter(Boolean);
     try { artifacts = await collectE2BArtifacts({ sandbox, userId, codePath, sharePath, generatedFiles }); } catch (artifactError) { artifactNotice = `The code ran, but generated files could not be saved: ${artifactError.message}`; }
     const finalExecution = { language: normalized, code: String(code), command, commands: commandList, activeCommand: commandList.length, stdout, stderr, exitCode, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled", userFolder: executionUserFolder(userId), inputFiles: stagedInputFiles, artifacts, artifactNotice };
     publishExecutionProgress(progressId, { phase: "completed", ...finalExecution });
