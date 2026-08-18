@@ -117,10 +117,12 @@ async function persistChatTurn({ chatId, userId, title, agentId, provider, reque
 async function indexWorkspaceArtifacts(userId, artifacts, content = "Workspace artifact") {
   const userPrefix = `users/${encodeURIComponent(String(userId))}/`;
   const normalized = (Array.isArray(artifacts) ? artifacts : []).filter((artifact) => artifact?.key && String(artifact.key).startsWith(userPrefix)).map((artifact) => ({
+    fileId: String(artifact.fileId || `file_${randomBytes(12).toString("hex")}`),
     name: safeObjectName(artifact.name || path.basename(artifact.key)),
     key: String(artifact.key),
     size: Number(artifact.size || 0),
     contentType: artifact.contentType || artifact.mimeType || artifact.content_type || artifact.type || "application/octet-stream",
+    createdAt: artifact.createdAt || new Date().toISOString(),
   }));
   if (!normalized.length) return;
   const chatId = `workspace_files_${String(userId)}`;
@@ -199,7 +201,7 @@ const AGENTS = {
     icon: "Code2",
     description: "Designs, writes, and explains practical code changes.",
     provider: "Gemini",
-    prompt: "You are the Coder agent inside Agent Garden. You have access to a real isolated E2B Ubuntu computer through the execution tool. When the user asks to run, execute, test, plot, calculate, inspect, or debug code, use the E2B computer path rather than claiming you cannot execute code. Give secure, runnable, minimal solutions, explain assumptions, and report the actual terminal command, stdout, stderr, exit code, and generated files returned by E2B. Never claim execution unless results are included in the prompt. Never expose sandbox:/ links, /tmp/agent-garden-users paths, /home/user paths, or any other internal E2B filesystem path; refer to generated files by their filename and Workspace Files link only.",
+    prompt: "You are the Coder agent inside Agent Garden. You have access to a real isolated E2B Ubuntu computer through the execution tool. When the user asks to run, execute, test, plot, calculate, inspect, or debug code, use the E2B computer path rather than claiming you cannot execute code. Give secure, runnable, minimal solutions, explain assumptions, and report the actual terminal command, stdout, stderr, exit code, and generated files returned by E2B. Never claim execution unless results are included in the prompt. When the user requests a file, create it with a clear filename in the shared workspace; the host automatically runs the artifact finalizer by filename before cleanup, uploads it to the user’s persistent files folder, assigns a file ID, and indexes metadata in D1. Report the filename, file ID, and persistent Workspace Files link only after those results are returned. Never expose sandbox:/ links, /tmp/agent-garden-users paths, /home/user paths, or any other internal E2B filesystem path.",
   },
   debugger: {
     label: "Debugger",
@@ -479,8 +481,8 @@ async function generateExecutionCode({ message, language = "python", userId, his
   const sharePath = executionSharePath(userId);
   const response = await gemini.models.generateContent({
     model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
-    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. Save generated visual or data artifacts under ${sharePath} or the current working directory and print each output filename, not its absolute path. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
-    config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only. Never create or print sandbox:/ links or expose absolute internal filesystem paths; print filenames only.`, temperature: 0.15, maxOutputTokens: 5000 },
+    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. Save generated visual or data artifacts under ${sharePath} or the current working directory. Print every generated filename on its own line using \`GENERATED_FILE: filename\` so the host artifact finalizer can upload exactly those files before cleanup. Do not print absolute paths. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
+    config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only. Never create or print sandbox:/ links or expose absolute internal filesystem paths; print filenames only. The host will upload printed/generated filenames to persistent storage, assign file IDs, index them, and provide links after the terminal finishes.`, temperature: 0.15, maxOutputTokens: 5000 },
   });
   const raw = response.text?.trim() || "";
   const fenced = raw.match(/```(?:python|py|javascript|js|node|bash|sh)?\\s*([\\s\\S]*?)```/i);
@@ -492,10 +494,12 @@ function artifactContentType(name) {
   return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", pdf: "application/pdf", csv: "text/csv", json: "application/json", txt: "text/plain", md: "text/markdown", html: "text/html", css: "text/css", js: "text/javascript", py: "text/x-python" })[extension] || "application/octet-stream";
 }
 
-async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath }) {
+async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath, generatedFiles = [] }) {
   if (!storage || !STORAGE_READY) return [];
-  const scan = await sandbox.commands.run(`find '${sharePath}' -type f -mmin -5 -size -10M ! -path '${codePath}' 2>/dev/null | head -20`, { timeoutMs: 10000 });
-  const paths = String(scan.stdout || "").split("\\n").map((value) => value.trim()).filter((value) => value && value !== codePath && !value.endsWith(".py") && !value.endsWith(".js") && !value.endsWith(".sh"));
+  const requestedNames = new Set((Array.isArray(generatedFiles) ? generatedFiles : []).map((name) => safeObjectName(name)).filter(Boolean));
+  const scan = await sandbox.commands.run(`find '${sharePath}' -type f -mmin -5 -size -10M ! -path '${codePath}' 2>/dev/null | head -40`, { timeoutMs: 10000 });
+  const discovered = String(scan.stdout || "").split("\\n").map((value) => value.trim()).filter((value) => value && value !== codePath && !value.endsWith(".py") && !value.endsWith(".js") && !value.endsWith(".sh"));
+  const paths = requestedNames.size ? discovered.filter((value) => requestedNames.has(safeObjectName(path.basename(value)))) : discovered;
   const artifacts = [];
   for (const artifactPath of paths.slice(0, 8)) {
     const name = safeObjectName(path.basename(artifactPath));
@@ -503,10 +507,11 @@ async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath }) {
     const encoded = await sandbox.commands.run(`base64 -w0 -- ${quotedPath}`, { timeoutMs: 15000 });
     const body = Buffer.from(String(encoded.stdout || "").trim(), "base64");
     if (!body.length || body.length > 10 * 1024 * 1024) continue;
-    const key = `users/${encodeURIComponent(userId)}/${Date.now()}-${randomBytes(8).toString("hex")}-${name}`;
+    const fileId = `file_${randomBytes(12).toString("hex")}`;
+    const key = `users/${encodeURIComponent(userId)}/files/${fileId}-${name}`;
     await storage.send(new PutObjectCommand({ Bucket: STORAGE_BUCKET, Key: key, Body: body, ContentType: artifactContentType(name), ContentDisposition: `attachment; filename="${name}"` }));
     const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 });
-    artifacts.push({ name, key, size: body.length, contentType: artifactContentType(name), url, expiresIn: 900 });
+    artifacts.push({ fileId, name, key, size: body.length, contentType: artifactContentType(name), url, expiresIn: 900, createdAt: new Date().toISOString() });
   }
   if (artifacts.length) {
     try { await indexWorkspaceArtifacts(userId, artifacts, "E2B-generated workspace files"); }
@@ -568,12 +573,16 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
     publishExecutionProgress(progressId, { phase: "finalizing", stdout, stderr, exitCode });
     let artifacts = [];
     let artifactNotice = "";
-    try { artifacts = await collectE2BArtifacts({ sandbox, userId, codePath, sharePath }); } catch (artifactError) { artifactNotice = `The code ran, but generated files could not be saved: ${artifactError.message}`; }
+    const generatedFiles = String(stdout || "").split("\\n").map((line) => line.match(/^GENERATED_FILE:\s*(.+?)\s*$/)?.[1]).filter(Boolean);
+    try { artifacts = await collectE2BArtifacts({ sandbox, userId, codePath, sharePath, generatedFiles }); } catch (artifactError) { artifactNotice = `The code ran, but generated files could not be saved: ${artifactError.message}`; }
     const finalExecution = { language: normalized, code: String(code), command, commands: commandList, activeCommand: commandList.length, stdout, stderr, exitCode, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled", userFolder: executionUserFolder(userId), artifacts, artifactNotice };
     publishExecutionProgress(progressId, { phase: "completed", ...finalExecution });
     if (progressId) setTimeout(() => executionProgress.delete(progressId), 10 * 60 * 1000).unref?.();
     return finalExecution;
-  } finally { try { await sandbox?.kill(); } catch {} }
+  } finally {
+    try { if (sandbox && sharePath) await sandbox.commands.run(`rm -rf '${sharePath.replaceAll("'", "'\\''")}'`, { timeoutMs: 10000 }); } catch (cleanupError) { console.warn("E2B workspace cleanup warning:", cleanupError.message); }
+    try { await sandbox?.kill(); } catch (killError) { console.warn("E2B sandbox shutdown warning:", killError.message); }
+  }
 }
 
 function isTransientGeminiError(error) {
