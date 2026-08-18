@@ -29,6 +29,16 @@ services:
         sync: false
       - key: SESSION_SECRET
         sync: false
+      - key: AUTH0_ISSUER_BASE_URL
+        sync: false
+      - key: AUTH0_CLIENT_ID
+        sync: false
+      - key: AUTH0_CLIENT_SECRET
+        sync: false
+      - key: AUTH0_SECRET
+        sync: false
+      - key: AUTH0_BASE_URL
+        value: https://agent-garden-chat.onrender.com
       - key: DATA_ENCRYPTION_KEY
         sync: false
       - key: D1_WORKER_URL
