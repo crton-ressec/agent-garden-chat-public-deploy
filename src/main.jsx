@@ -194,8 +194,13 @@ function App() {
       .then((data) => setUser(data.user || (data.authRequired === false ? data.testUser : null)))
       .catch(() => undefined);
     try {
-      const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "[]");
+      const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
       if (Array.isArray(saved)) setMessages(saved);
+      else if (saved && typeof saved === "object") {
+        if (Array.isArray(saved.messages)) setMessages(saved.messages);
+        if (saved.chatId) setChatId(saved.chatId);
+        if (saved.chatTitle) setChatTitle(saved.chatTitle);
+      }
     } catch {
       sessionStorage.removeItem(STORAGE_KEY);
     }
@@ -335,14 +340,14 @@ function App() {
       setFiles([]);
       setAgentLog([]);
       setNotice("");
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ chatId: chat.id, chatTitle: chat.title || "New conversation", messages: normalized }));
     } catch (error) { setNotice(error.message); }
   }
 
   useEffect(() => {
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ chatId, chatTitle, messages }));
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
+  }, [messages, chatId, chatTitle]);
 
   async function signInWithGoogle() {
     setSigningIn(true);

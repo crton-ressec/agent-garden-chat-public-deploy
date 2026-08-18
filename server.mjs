@@ -932,7 +932,11 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
 
   try {
     let result;
-    if (execute && !casual && !isCasualMessage(message)) {
+    if (casual || isCasualMessage(message)) {
+      result = { answer: "Hi! I’m Agent Garden. I can have a normal conversation, research topics, work with files, and use the isolated E2B terminal when you explicitly ask me to run code or create files.", provider: "Agent Garden", sources: [] };
+    } else if (isExecutionCapabilityQuestion(message)) {
+      result = { answer: "Yes. I can run Python, JavaScript, and Bash in an isolated E2B Ubuntu terminal. Ask me to run a command or script explicitly; I will show the terminal activity and then summarize the verified result. I did not execute anything for this capability answer.", provider: "Agent Garden", sources: [] };
+    } else if (execute && !casual && !isCasualMessage(message)) {
       const request = extractExecutionRequest(message);
       if (generateCode) request.code = await generateExecutionCode({ message, language: request.language, userId: req.user.sub, history: req.body?.history });
       if (!request.code) {
