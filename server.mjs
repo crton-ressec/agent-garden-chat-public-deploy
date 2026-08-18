@@ -483,14 +483,14 @@ async function generateExecutionResponse({ message, execution, agentPrompt }) {
   } catch { return null; }
 }
 
-async function generateExecutionCode({ message, language = "python", userId, history }) {
+async function generateExecutionCode({ message, language = "python", userId, history, inputFiles = [] }) {
   if (!gemini) throw new Error("Gemini is not configured to generate execution code.");
   const normalized = String(language || "python").toLowerCase();
   const languageLabel = normalized === "bash" || normalized === "sh" ? "Bash shell" : normalized === "javascript" || normalized === "js" || normalized === "node" ? "JavaScript for Node.js" : "Python 3";
   const sharePath = executionSharePath(userId);
   const response = await gemini.models.generateContent({
     model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
-    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. If the request asks to make, create, write, generate, or package any file or files—whether a ZIP, PDF, CSV, JSON, image, document, spreadsheet, script, or archive—write the complete creation script yourself; do not wait for the user to paste code. Create every requested output with a clear filename and print one \`GENERATED_FILE: filename\` marker per output. For ZIPs, create the requested test files and package them into a clearly named archive. Save generated visual or data artifacts under ${sharePath} or the current working directory. Print every generated filename on its own line using \`GENERATED_FILE: filename\` so the host artifact finalizer can upload exactly those files before cleanup. Do not print absolute paths. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
+    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. If the request asks to make, create, write, generate, or package any file or files—whether a ZIP, PDF, CSV, JSON, image, document, spreadsheet, script, or archive—write the complete creation script yourself; do not wait for the user to paste code. Create every requested output with a clear filename and print one \`GENERATED_FILE: filename\` marker per output. For ZIPs, create the requested test files and package them into a clearly named archive. The following user-uploaded input files will be available in the E2B workspace by filename: ${inputFiles.map((file) => safeObjectName(file?.name || "uploaded-file")).filter(Boolean).join(", ") || "none"}. Read them directly by filename when useful. Save generated visual or data artifacts under ${sharePath} or the current working directory. Print every generated filename on its own line using \`GENERATED_FILE: filename\` so the host artifact finalizer can upload exactly those files before cleanup. Do not print absolute paths. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
     config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only. Never create or print sandbox:/ links or expose absolute internal filesystem paths; print filenames only. The host will upload printed/generated filenames to persistent storage, assign file IDs, index them, and provide links after the terminal finishes.`, temperature: 0.15, maxOutputTokens: 5000 },
   });
   const raw = response.text?.trim() || "";
@@ -541,13 +541,37 @@ async function collectE2BArtifacts({ sandbox, userId, codePath, sharePath, gener
   return artifacts;
 }
 
+async function stageUploadedFilesInE2B({ sandbox, sharePath, files = [] }) {
+  const staged = [];
+  let totalBytes = 0;
+  const usedNames = new Set();
+  for (const file of (Array.isArray(files) ? files : []).slice(0, 5)) {
+    const rawName = safeObjectName(file?.name || "uploaded-file");
+    if (!rawName) continue;
+    const encoded = String(file?.data || "").replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
+    if (!encoded) continue;
+    const body = Buffer.from(encoded, "base64");
+    if (!body.length || body.length > 5 * 1024 * 1024) continue;
+    totalBytes += body.length;
+    if (totalBytes > 20 * 1024 * 1024) break;
+    let name = rawName;
+    let suffix = 2;
+    while (usedNames.has(name)) name = `${path.basename(rawName, path.extname(rawName))}-${suffix++}${path.extname(rawName)}`;
+    usedNames.add(name);
+    const target = `${sharePath}/${name}`;
+    await sandbox.files.write(target, body);
+    staged.push({ name, size: body.length, mimeType: file.mimeType || "application/octet-stream" });
+  }
+  return staged;
+}
+
 function publishExecutionProgress(id, patch) {
   if (!id) return;
   const current = executionProgress.get(id) || { stdout: "", stderr: "", phase: "provisioning", startedAt: Date.now() };
   executionProgress.set(id, { ...current, ...patch, updatedAt: Date.now() });
 }
 
-async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, userId, progressId }) {
+async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, userId, progressId, inputFiles = [] }) {
   if (!E2B_READY) throw new Error("E2B execution is not configured on the server yet.");
   const normalized = String(language || "python").toLowerCase();
   const allowedLanguages = new Set(["python", "python3", "py", "javascript", "js", "node", "bash", "sh"]);
@@ -562,12 +586,13 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
     const sharePath = executionSharePath(userId);
     const codePath = `${sharePath}/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
     await sandbox.commands.run(`mkdir -p '${sharePath}'`, { timeoutMs: 10000 });
+    const stagedInputFiles = await stageUploadedFilesInE2B({ sandbox, sharePath, files: inputFiles });
     await sandbox.files.write(codePath, String(code));
     const scriptCommand = extension === "py" ? `mkdir -p '${sharePath}' && cd '${sharePath}' && python3 '${codePath}'` : extension === "sh" ? `mkdir -p '${sharePath}' && cd '${sharePath}' && bash '${codePath}'` : `mkdir -p '${sharePath}' && cd '${sharePath}' && node '${codePath}'`;
     const requestedCommands = Array.isArray(commands) ? commands.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8).map((item) => item.slice(0, 12000)) : [];
     const commandList = requestedCommands.length ? requestedCommands : [scriptCommand];
     const command = commandList.join("\\n");
-    publishExecutionProgress(progressId, { phase: "running", language: normalized, command, commands: commandList, stdout: "", stderr: "", network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled" });
+    publishExecutionProgress(progressId, { phase: "running", language: normalized, command, commands: commandList, stdout: "", stderr: "", inputFiles: stagedInputFiles, network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled" });
     let stdout = "";
     let stderr = "";
     let exitCode = 0;
@@ -596,7 +621,7 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
     let artifactNotice = "";
     const generatedFiles = String(stdout || "").split("\\n").map((line) => line.match(/^GENERATED_FILE:\s*(.+?)\s*$/)?.[1]).filter(Boolean);
     try { artifacts = await collectE2BArtifacts({ sandbox, userId, codePath, sharePath, generatedFiles }); } catch (artifactError) { artifactNotice = `The code ran, but generated files could not be saved: ${artifactError.message}`; }
-    const finalExecution = { language: normalized, code: String(code), command, commands: commandList, activeCommand: commandList.length, stdout, stderr, exitCode, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled", userFolder: executionUserFolder(userId), artifacts, artifactNotice };
+    const finalExecution = { language: normalized, code: String(code), command, commands: commandList, activeCommand: commandList.length, stdout, stderr, exitCode, durationMs: Date.now() - startedAt, status: "completed", sandbox: "e2b", network: process.env.E2B_ALLOW_INTERNET !== "false" ? "internet-enabled" : "internet-disabled", userFolder: executionUserFolder(userId), inputFiles: stagedInputFiles, artifacts, artifactNotice };
     publishExecutionProgress(progressId, { phase: "completed", ...finalExecution });
     if (progressId) setTimeout(() => executionProgress.delete(progressId), 10 * 60 * 1000).unref?.();
     return finalExecution;
@@ -900,7 +925,7 @@ app.get("/api/e2b/progress/:id", requireUser, (req, res) => {
 });
 
 app.post("/api/e2b/run", requireUser, userRateLimit, async (req, res) => {
-  try { res.json({ ok: true, ...(await executeInE2B({ language: req.body?.language, code: req.body?.code, commands: req.body?.commands, timeoutMs: req.body?.timeoutMs, userId: req.user.sub, progressId: req.body?.executionId })) }); }
+  try { res.json({ ok: true, ...(await executeInE2B({ language: req.body?.language, code: req.body?.code, commands: req.body?.commands, timeoutMs: req.body?.timeoutMs, userId: req.user.sub, progressId: req.body?.executionId, inputFiles: req.body?.files })) }); }
   catch (error) { res.status(502).json({ error: error.message || "E2B execution failed." }); }
 });
 
@@ -959,11 +984,11 @@ app.post("/api/chat", requireUser, userRateLimit, async (req, res) => {
       result = { answer: "Yes. I can run Python, JavaScript, and Bash in an isolated E2B Ubuntu terminal. Ask me to run a command or script explicitly; I will show the terminal activity and then summarize the verified result. I did not execute anything for this capability answer.", provider: "Agent Garden", sources: [] };
     } else if (execute && !casual && !isCasualMessage(message)) {
       const request = extractExecutionRequest(message);
-      if (generateCode) request.code = await generateExecutionCode({ message, language: request.language, userId: req.user.sub, history: req.body?.history });
+      if (generateCode) request.code = await generateExecutionCode({ message, language: request.language, userId: req.user.sub, history: req.body?.history, inputFiles: files });
       if (!request.code) {
         result = { answer: `## Ready to run\n\nI detected a ${request.language} execution request, but no code was included. Paste the code in a fenced block or write it after a colon, for example:\n\n\`\`\`${request.language}\nprint(2 + 3)\n\`\`\``, provider: "E2B", sources: [], execution: { status: "awaiting_code", language: request.language, code: "", stdout: "", stderr: "", exitCode: null, sandbox: "e2b", artifacts: [] } };
       } else {
-        const execution = await executeInE2B({ ...request, commands: req.body?.commands, userId: req.user.sub, progressId: req.body?.executionId });
+        const execution = await executeInE2B({ ...request, commands: req.body?.commands, userId: req.user.sub, progressId: req.body?.executionId, inputFiles: files });
         const output = [execution.stdout && `STDOUT\n${execution.stdout.trim()}`, execution.stderr && `STDERR\n${execution.stderr.trim()}`, `Exit code: ${execution.exitCode}`].filter(Boolean).join("\n\n");
         const generatedResponse = await generateExecutionResponse({ message, execution, agentPrompt: agent.prompt });
         const fence = "```";
