@@ -29,6 +29,16 @@ services:
         sync: false
       - key: SESSION_SECRET
         sync: false
+      - key: DATA_ENCRYPTION_KEY
+        sync: false
+      - key: D1_WORKER_URL
+        sync: false
+      - key: D1_WORKER_KEY
+        sync: false
+      - key: PUBLIC_ORIGIN
+        value: https://agent-garden-chat.onrender.com
+      - key: E2B_ALLOW_INTERNET
+        value: "true"
       - key: STORAGE_PROVIDER
         value: tigris
       - key: TIGRIS_BUCKET_NAME
