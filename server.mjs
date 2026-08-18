@@ -264,6 +264,12 @@ function isComputerRequest(message) {
     || (/\b(command|terminal|sandbox|computer)\b/i.test(text) && /\b(please|can you|i want|need you|make|run|do)\b/i.test(text));
 }
 
+function isFileCreationRequest(message) {
+  const text = String(message || "").trim();
+  return /\b(make|create|generate|build|write|produce|prepare|package|zip|archive|bundle)\b[\s\S]{0,120}\b(file|files|folder|archive|zip|tar|csv|json|txt|pdf|document|spreadsheet|script|project|test files?)\b/i.test(text)
+    || /\b(zip|archive|bundle)\b[\s\S]{0,80}\b(with|containing|including)\b/i.test(text);
+}
+
 function routeRequest(message, files) {
   if (Array.isArray(files) && files.length) {
     return { id: "fileAnalyst", reason: "An attachment was supplied, so File Analyst was selected." };
@@ -274,6 +280,9 @@ function routeRequest(message, files) {
   }
   if (isExecutionCapabilityQuestion(message)) {
     return { id: "coordinator", capability: true, reason: "This is a capability question, so the Coordinator will explain the available execution environment without running code." };
+  }
+  if (isFileCreationRequest(message)) {
+    return { id: "coder", execute: true, generateCode: true, reason: "A file-creation request was detected, so Agent Garden will generate the file in E2B and finalize it into Workspace Files." };
   }
   if (/\b(pie chart|bar chart|line chart|scatter plot|plot|graph|visuali[sz]e|data visualization)\b/i.test(String(message || ""))) {
     return { id: "coder", execute: true, generateCode: true, reason: "A visualization request was detected, so Agent Garden will generate and run code in the E2B sandbox." };
@@ -481,7 +490,7 @@ async function generateExecutionCode({ message, language = "python", userId, his
   const sharePath = executionSharePath(userId);
   const response = await gemini.models.generateContent({
     model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
-    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. Save generated visual or data artifacts under ${sharePath} or the current working directory. Print every generated filename on its own line using \`GENERATED_FILE: filename\` so the host artifact finalizer can upload exactly those files before cleanup. Do not print absolute paths. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
+    contents: [{ role: "user", parts: [{ text: `Write a complete ${languageLabel} script for this user request: ${message}\\n\\nReturn only executable ${languageLabel} code, with no Markdown fences or explanation. If the request asks to make, create, or package files—especially a ZIP or archive—write the complete creation script yourself; do not wait for the user to paste code. For ZIPs, create the requested test files, package them into a clearly named `.zip`, and print \`GENERATED_FILE: archive-name.zip\`. Save generated visual or data artifacts under ${sharePath} or the current working directory. Print every generated filename on its own line using \`GENERATED_FILE: filename\` so the host artifact finalizer can upload exactly those files before cleanup. Do not print absolute paths. For charts, prefer a self-contained SVG or CSV and do not assume third-party packages are installed. Internet access is available inside the isolated E2B sandbox for public resources, but do not access secrets, private services, or the host system.\\n\\nRecent context:\\n${compactHistory(history).map((entry) => entry.parts[0].text).join("\\n")}` }] }],
     config: { systemInstruction: `You generate safe, self-contained ${languageLabel} scripts for an isolated E2B Ubuntu sandbox. Return code only. Never create or print sandbox:/ links or expose absolute internal filesystem paths; print filenames only. The host will upload printed/generated filenames to persistent storage, assign file IDs, index them, and provide links after the terminal finishes.`, temperature: 0.15, maxOutputTokens: 5000 },
   });
   const raw = response.text?.trim() || "";
