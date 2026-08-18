@@ -226,6 +226,26 @@ function authRateLimit(req, res, next) {
   next();
 }
 
+async function firebaseAuthHelperProxy(req, res) {
+  const helperOrigin = String(process.env.FIREBASE_HELPER_ORIGIN || `https://${process.env.FIREBASE_AUTH_DOMAIN || "agentic-garden.firebaseapp.com"}`).replace(/\/$/, "");
+  const target = `${helperOrigin}${req.originalUrl}`;
+  try {
+    const headers = {};
+    for (const name of ["accept", "content-type", "user-agent", "cookie", "cache-control"]) if (req.get(name)) headers[name] = req.get(name);
+    headers.host = new URL(helperOrigin).host;
+    const upstream = await fetch(target, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body, redirect: "manual", signal: AbortSignal.timeout(12000) });
+    res.status(upstream.status);
+    for (const name of ["content-type", "cache-control", "location", "set-cookie", "content-security-policy"]) {
+      const value = upstream.headers.get(name);
+      if (value) res.setHeader(name, value);
+    }
+    res.send(Buffer.from(await upstream.arrayBuffer()));
+  } catch (error) {
+    console.warn("Firebase helper proxy unavailable:", error.message);
+    res.status(502).send("Firebase authentication helper unavailable.");
+  }
+}
+
 function sameOriginGuard(req, res, next) {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
   const origin = req.get("origin");
@@ -440,6 +460,7 @@ function resolveAgent(requestedId, message, files) {
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use(["/__/auth", "/__/firebase"], express.raw({ type: "*/*", limit: "2mb" }), firebaseAuthHelperProxy);
 app.use(express.json({ limit: "14mb" }));
 app.use(cookieParser());
 app.use("/api", sameOriginGuard);
@@ -837,13 +858,14 @@ async function callPollinations({ agent, message, history, files }) {
   return { answer, provider: "Pollinations", sources: [] };
 }
 
-app.get("/api/config", (_req, res) => {
+app.get("/api/config", (req, res) => {
+  const publicOrigin = String(process.env.FIREBASE_CLIENT_AUTH_DOMAIN || process.env.PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || `https://${req.get("host") || ""}`).replace(/^https?:\/\//, "").replace(/\/$/, "");
   res.json({
     authRequired: authRequired(),
     testUser: authRequired() ? null : TEMP_TEST_USER,
     firebaseConfig: {
       apiKey: process.env.FIREBASE_API_KEY || "",
-      authDomain: process.env.FIREBASE_AUTH_DOMAIN || "",
+      authDomain: publicOrigin || process.env.FIREBASE_AUTH_DOMAIN || "",
       projectId: process.env.FIREBASE_PROJECT_ID || "",
       storageBucket: process.env.FIREBASE_STORAGE_BUCKET || "",
       messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "",
