@@ -87,8 +87,8 @@ async function indexWorkspaceArtifacts(userId, artifacts, content = "Workspace a
   }));
   if (!normalized.length) return;
   const chatId = `workspace_files_${String(userId)}`;
-  await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: String(userId), title: "Workspace files", agentId: "storage", provider: "B2" }) });
-  await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `file_index_${randomBytes(12).toString("hex")}`, chatId, userId: String(userId), role: "assistant", content: String(content).slice(0, 500), agentId: "storage", provider: "B2", metadata: { artifacts: normalized } }) });
+  await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: String(userId), title: "Workspace files", agentId: "storage", provider: STORAGE_PROVIDER }) });
+  await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `file_index_${randomBytes(12).toString("hex")}`, chatId, userId: String(userId), role: "assistant", content: String(content).slice(0, 500), agentId: "storage", provider: STORAGE_PROVIDER, metadata: { artifacts: normalized } }) });
 }
 
 async function signedWorkspaceFiles(artifacts) {
@@ -697,11 +697,15 @@ app.post("/api/storage/upload", requireUser, async (req, res) => {
 app.get("/api/storage/files", requireUser, async (req, res) => {
   if (!requireStorage(res)) return;
   const prefix = `users/${encodeURIComponent(req.user.sub)}/`;
+  let indexedFiles = null;
   try {
     try {
       const indexed = await d1Request(`/v1/files/${encodeURIComponent(req.user.sub)}`);
-      if (Array.isArray(indexed?.files)) return res.json({ files: await signedWorkspaceFiles(indexed.files), source: "d1-index" });
-    } catch (error) { console.warn("D1 file index read unavailable; falling back to B2 listing:", error.message); }
+      if (Array.isArray(indexed?.files)) {
+        indexedFiles = indexed.files;
+        if (indexedFiles.length) return res.json({ files: await signedWorkspaceFiles(indexedFiles), source: "d1-index" });
+      }
+    } catch (error) { console.warn("D1 file index read unavailable; falling back to object listing:", error.message); }
     const listed = await storage.send(new ListObjectsV2Command({ Bucket: STORAGE_BUCKET, Prefix: prefix, MaxKeys: 100 }));
     const files = await Promise.all((listed.Contents || []).filter((item) => item.Key).map(async (item) => {
       const key = item.Key;
@@ -709,8 +713,13 @@ app.get("/api/storage/files", requireUser, async (req, res) => {
       const url = await getSignedUrl(storage, new GetObjectCommand({ Bucket: STORAGE_BUCKET, Key: key }), { expiresIn: 900 });
       return { key, name, size: Number(item.Size || 0), lastModified: item.LastModified || null, url, expiresIn: 900 };
     }));
-    res.json({ files });
-  } catch (error) { res.status(502).json({ error: error.message || "Could not list workspace files." }); }
+    res.json({ files, source: "object-list" });
+  } catch (error) {
+    try {
+      if (indexedFiles) return res.json({ files: await signedWorkspaceFiles(indexedFiles), source: "d1-index" });
+    } catch (fallbackError) { console.warn("D1 indexed file signing unavailable:", fallbackError.message); }
+    res.status(502).json({ error: error.message || "Could not list workspace files." });
+  }
 });
 
 app.post("/api/storage/download-url", requireUser, async (req, res) => {

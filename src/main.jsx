@@ -289,8 +289,10 @@ function App() {
     return () => { cancelled = true; };
   }, [user, config.authRequired]);
 
+  const userId = user?.sub || null;
+
   const loadWorkspaceFiles = useCallback(async () => {
-    if (!user) return;
+    if (!userId) return;
     setFilesLoading(true);
     try {
       const response = await fetch(`/api/storage/files?client=${Date.now()}`, { cache: "no-store" });
@@ -299,9 +301,9 @@ function App() {
       setWorkspaceFiles(data.files || []);
     } catch (error) { setNotice(error.message); }
     finally { setFilesLoading(false); }
-  }, [user]);
+  }, [userId]);
 
-  useEffect(() => { if (user) loadWorkspaceFiles(); }, [user, loadWorkspaceFiles]);
+  useEffect(() => { if (userId) loadWorkspaceFiles(); }, [userId, loadWorkspaceFiles]);
 
   useEffect(() => {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
