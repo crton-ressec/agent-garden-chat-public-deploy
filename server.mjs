@@ -390,6 +390,7 @@ function resolveAgent(requestedId, message, files) {
 }
 
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 app.use(express.json({ limit: "14mb" }));
 app.use(cookieParser());
