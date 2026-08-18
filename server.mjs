@@ -227,6 +227,10 @@ function isCasualMessage(message) {
   return /^(hi|hello|hey|yo|sup|what's up|how are you|thanks|thank you|good morning|good evening)[!.?, ]*$/i.test(String(message || "").trim());
 }
 
+function isExecutionCapabilityQuestion(message) {
+  return /^(can|could|does|do|is|are|will|what|how)\b[\s\S]{0,100}\b(run|execute|use|access|support)\b[\s\S]{0,60}\b(python|python3|javascript|node|bash|shell|code|script)\b[\s\S]*\?*$/i.test(String(message || "").trim());
+}
+
 function routeRequest(message, files) {
   if (Array.isArray(files) && files.length) {
     return { id: "fileAnalyst", reason: "An attachment was supplied, so File Analyst was selected." };
@@ -234,6 +238,9 @@ function routeRequest(message, files) {
   const text = String(message || "").toLowerCase();
   if (isCasualMessage(message)) {
     return { id: "coordinator", casual: true, reason: "This is casual conversation, so the workspace will answer naturally without starting a project intake." };
+  }
+  if (isExecutionCapabilityQuestion(message)) {
+    return { id: "coordinator", capability: true, reason: "This is a capability question, so the Coordinator will explain the available execution environment without running code." };
   }
   if (/\b(pie chart|bar chart|line chart|scatter plot|plot|graph|visuali[sz]e|data visualization)\b/i.test(String(message || ""))) {
     return { id: "coder", execute: true, generateCode: true, reason: "A visualization request was detected, so Agent Garden will generate and run code in the E2B sandbox." };
@@ -291,9 +298,9 @@ async function fetchPublicPage(url) {
 function resolveAgent(requestedId, message, files) {
   if (requestedId === "auto" || !AGENTS[requestedId]) {
     const route = routeRequest(message, files);
-    return { agent: { id: route.id, ...AGENTS[route.id], ...(route.casual ? { prompt: "You are a warm, natural conversational assistant inside a multi-agent workspace. Respond directly to the user’s greeting or small talk. Do not ask onboarding questions, do not assign specialists, and do not turn a simple exchange into a project intake. If the user later asks for substantive work, help them transition naturally." } : {}) }, routingReason: route.reason, casual: Boolean(route.casual), execute: Boolean(route.execute) && !route.casual, generateCode: Boolean(route.generateCode) && !route.casual };
+    return { agent: { id: route.id, ...AGENTS[route.id], ...(route.casual ? { prompt: "You are a warm, natural conversational assistant inside a multi-agent workspace. Respond directly to the user’s greeting or small talk. Do not ask onboarding questions, do not assign specialists, and do not turn a simple exchange into a project intake. If the user later asks for substantive work, help them transition naturally." } : route.capability ? { prompt: "Answer capability questions directly and briefly. If asked whether Agent Garden can run Python, JavaScript, or Bash, explain that it can run those languages in an isolated E2B Ubuntu sandbox, show a short example of what the user should ask, and make clear that you did not execute anything unless the user explicitly asks you to run it. Do not call tools, generate code, or start E2B for a capability question." } : {}) }, routingReason: route.reason, casual: Boolean(route.casual), execute: Boolean(route.execute) && !route.casual, generateCode: Boolean(route.generateCode) && !route.casual };
   }
-  return { agent: { id: requestedId, ...AGENTS[requestedId] }, routingReason: "Selected manually by the user.", execute: false, generateCode: false };
+  return { agent: { id: requestedId, ...AGENTS[requestedId] }, routingReason: "Selected manually by the user.", casual: false, execute: false, generateCode: false };
 }
 
 app.set("trust proxy", 1);
