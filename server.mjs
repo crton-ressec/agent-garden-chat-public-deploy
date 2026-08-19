@@ -677,6 +677,7 @@ async function handleAdminCommand({ message, user }) {
     return { answer: `## Appeal action completed\n\nAppeal **${appealMatch[1]}** was marked **${status}**.`, provider: "Admin Control", sources: [], adminAction: status };
   }
   const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase();
+  if (!email && /\b(ban|suspend|unban|reinstate|activate)\b/i.test(text)) return { answer: "For safety, provide the target user’s exact email address. No moderation action was taken.", provider: "Admin Control", sources: [], adminAction: "needs_target" };
   if (email && /\b(ban|suspend|unban|reinstate|activate)\b/i.test(text)) {
     const status = /\b(unban|reinstate|activate)\b/i.test(text) ? "active" : "suspended"; const reason = String(text.replace(email, "")).replace(/\b(ban|suspend|unban|reinstate|activate)\b/i, "").trim() || (status === "active" ? "Restored by administrator." : "Suspended by administrator after moderation review.");
     const overview = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) }); const target = (overview?.users || []).find((candidate) => String(candidate.email || "").toLowerCase() === email);
