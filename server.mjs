@@ -90,10 +90,24 @@ function explicitMinorSignal(message) {
   return /(?:i(?:'|\s)?m|i am|my age is|age is|i turn|under)\s*(?:only\s*)?(?:1[0-6]|[0-9])\b|\b(?:1[0-6]|[0-9])\s*(?:years?\s*old|yo)\b|\bunder\s*17\b/.test(text);
 }
 
-async function reportSafetySignal({ userId, message, signal = "explicit_under_17" }) {
+function detectSafetySignals(message) {
+  const text = String(message || "").toLowerCase(); const signals = [];
+  if (explicitMinorSignal(text)) signals.push({ signal: "explicit_under_17", confidence: "explicit" });
+  if (/(sexual|nude|naked|porn|explicit sex|sexual exploit).{0,80}(minor|child|kid|teen|underage|16|15|14|13|12|11|10|9|8|7|6|5|4|3|2|1\b)/i.test(text) || /(minor|child|kid|teen|underage).{0,80}(sexual|nude|porn|explicit)/i.test(text)) signals.push({ signal: "inappropriate_underage_request", confidence: "high" });
+  if (/(ignore|disregard|forget).{0,80}(previous|prior|system|developer|safety|instruction)/i.test(text) || /(reveal|show|print|dump).{0,80}(system prompt|hidden prompt|secret instructions|policy)/i.test(text)) signals.push({ signal: "prompt_injection_attempt", confidence: "medium" });
+  if (/(show|give|reveal|extract|dump|steal|exfiltrat).{0,80}(api key|token|password|cookie|secret|credential|private key)/i.test(text)) signals.push({ signal: "credential_exfiltration_attempt", confidence: "high" });
+  if (/(access|open|read|download|delete|list|view).{0,100}(another user|someone else|other user|admin|private|restricted|forbidden).{0,100}(file|chat|account|database|resource|workspace|credential)/i.test(text) || /(bypass|evade|circumvent|disable).{0,80}(permission|authorization|access control|admin|safety)/i.test(text)) signals.push({ signal: "unauthorized_resource_access_attempt", confidence: "high" });
+  if (/(make|create|generate|write|provide|help with).{0,100}(malware|ransomware|credential stealer|phishing kit|keylogger|botnet|exploit).{0,100}(deploy|steal|attack|victim|target)/i.test(text)) signals.push({ signal: "harmful_or_abusive_request", confidence: "high" });
+  return signals;
+}
+async function reportSafetySignals({ userId, message }) {
+  if (!userId || String(userId) === "temporary-test-user") return;
+  for (const finding of detectSafetySignals(message)) void reportSafetySignal({ userId, message, ...finding });
+}
+async function reportSafetySignal({ userId, message, signal = "explicit_under_17", confidence = "explicit" }) {
   if (!userId || String(userId) === "temporary-test-user") return;
   try {
-    await d1RequestWithRetry("/v1/safety/reports", { method: "POST", body: JSON.stringify({ userId: String(userId), signal, confidence: "explicit", policyVersion: "2026-08-age-safety-v1", source: "server-message-detector", excerpt: seal(String(message || "").slice(0, 300)) }) });
+    await d1RequestWithRetry("/v1/safety/reports", { method: "POST", body: JSON.stringify({ userId: String(userId), signal, confidence, policyVersion: "2026-08-trust-safety-v2", source: "server-message-detector", excerpt: seal(String(message || "").slice(0, 300)) }) });
   } catch (error) {
     console.warn("Safety report persistence unavailable:", error.message);
   }
@@ -648,6 +662,34 @@ function requireAdmin(req, res, next) {
   if (!isAdminIdentity(req.user)) return res.status(403).json({ error: "Admin access required." });
   next();
 }
+async function handleAdminCommand({ message, user }) {
+  if (!isAdminIdentity(user)) return null;
+  const text = String(message || "").trim(); const lower = text.toLowerCase();
+  if (/\b(check|show|list|review|fetch)\b[\s\S]{0,80}\bappeals?\b/i.test(text)) {
+    const data = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) }); const appeals = data?.appeals || [];
+    if (!appeals.length) return { answer: "## Appeals\n\nThere are no appeals in the moderation queue.", provider: "Admin Control", sources: [], adminAction: "list_appeals" };
+    return { answer: `## Appeals\n\n${appeals.map((appeal) => `- **${appeal.id}** · ${appeal.status} · user ${appeal.user_id}\n  ${String(appeal.text || "").slice(0, 500)}`).join("\n")}`, provider: "Admin Control", sources: [], adminAction: "list_appeals" };
+  }
+  const appealMatch = text.match(/\b(?:approve|deny|reject)\b[\s\S]{0,60}\bappeal\b[\s:#-]*([A-Za-z0-9_-]+)/i);
+  if (appealMatch) {
+    const status = /\b(?:deny|reject)\b/i.test(text) ? "denied" : "approved"; const response = status === "approved" ? "Your appeal was approved by the administrator." : "Your appeal was denied after moderation review.";
+    await d1Request(`/v1/admin/appeals/${encodeURIComponent(appealMatch[1])}`, { method: "PATCH", body: JSON.stringify({ adminUserId: user.sub, status, response }) });
+    return { answer: `## Appeal action completed\n\nAppeal **${appealMatch[1]}** was marked **${status}**.`, provider: "Admin Control", sources: [], adminAction: status };
+  }
+  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase();
+  if (email && /\b(ban|suspend|unban|reinstate|activate)\b/i.test(text)) {
+    const status = /\b(unban|reinstate|activate)\b/i.test(text) ? "active" : "suspended"; const reason = String(text.replace(email, "")).replace(/\b(ban|suspend|unban|reinstate|activate)\b/i, "").trim() || (status === "active" ? "Restored by administrator." : "Suspended by administrator after moderation review.");
+    const overview = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) }); const target = (overview?.users || []).find((candidate) => String(candidate.email || "").toLowerCase() === email);
+    if (!target) return { answer: `I could not find an account for **${email}**. No moderation action was taken.`, provider: "Admin Control", sources: [], adminAction: "not_found" };
+    await d1Request(`/v1/admin/users/${encodeURIComponent(target.id)}`, { method: "PATCH", body: JSON.stringify({ adminUserId: user.sub, status, reason }) });
+    return { answer: `## User status updated\n\n**${email}** is now **${status === "suspended" ? "banned/suspended" : "active"}**.\n\nReason: ${reason}`, provider: "Admin Control", sources: [], adminAction: status };
+  }
+  if (/\b(admin|moderation|safety)\b/i.test(lower) && /\b(reports?|users?|status|overview|dashboard)\b/i.test(lower)) {
+    const data = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) });
+    return { answer: `## Moderation overview\n\nUsers: ${(data?.users || []).length}\nOpen appeals: ${(data?.appeals || []).filter((item) => item.status === "open").length}\nSafety reports: ${(data?.reports || []).length}`, provider: "Admin Control", sources: [], adminAction: "overview" };
+  }
+  return null;
+}
 
 function userRateLimit(req, res, next) {
   const now = Date.now();
@@ -1127,8 +1169,8 @@ app.post("/api/admin/overview", requireUser, requireAdmin, async (req, res) => {
 });
 
 app.patch("/api/admin/users/:userId", requireUser, requireAdmin, async (req, res) => {
-  const status = req.body?.status === "suspended" ? "suspended" : req.body?.status === "active" ? "active" : null;
-  if (!status) return res.status(400).json({ error: "Status must be active or suspended." });
+  const status = ["suspended", "banned"].includes(String(req.body?.status || "").toLowerCase()) ? "suspended" : req.body?.status === "active" ? "active" : null;
+  if (!status) return res.status(400).json({ error: "Status must be active, suspended, or banned." });
   try { res.json(await d1Request(`/v1/admin/users/${encodeURIComponent(req.params.userId)}`, { method: "PATCH", body: JSON.stringify({ adminUserId: req.user.sub, status, reason: String(req.body?.reason || "").slice(0, 2000) }) })); }
   catch (error) { res.status(502).json({ error: error.message || "Could not update user status." }); }
 });
@@ -1330,7 +1372,7 @@ app.get("/api/chats/:chatId", requireUser, enforceActiveAccount, async (req, res
 
 app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (req, res) => {
   const message = String(req.body?.message || "").trim();
-  if (explicitMinorSignal(message) && String(req.user.email || "").toLowerCase() !== ADMIN_EMAIL) void reportSafetySignal({ userId: req.user.sub, message });
+  if (String(req.user.email || "").toLowerCase() !== ADMIN_EMAIL) void reportSafetySignals({ userId: req.user.sub, message });
   const requestedAgentId = typeof req.body?.agentId === "string" ? req.body.agentId : "auto";
   const requestedProvider = req.body?.provider === "pollinations" ? "pollinations" : "gemini";
   const files = validateIncomingFiles(req.body?.files);
@@ -1365,7 +1407,10 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
 
   try {
     let result;
-    if (isWebImageRequest(message)) {
+    const adminCommandResult = await handleAdminCommand({ message, user: req.user });
+    if (adminCommandResult) {
+      result = adminCommandResult;
+    } else if (isWebImageRequest(message)) {
       try {
         const imageArtifacts = await fetchWebImages({ query: message, userId: req.user.sub, limit: 5 });
         result = { answer: `I fetched ${imageArtifacts.length} public image${imageArtifacts.length === 1 ? "" : "s"} and saved them to Workspace files.\n\n${imageArtifacts.map((artifact, index) => `${index + 1}. [${artifact.name}](${artifact.url}) — source: ${artifact.sourceUrl}`).join("\n")}`, provider: "Web Image Retrieval", sources: imageArtifacts.map((artifact) => ({ title: artifact.name, uri: artifact.sourceUrl })), execution: { status: "completed", language: "web", code: "", command: "image search and storage", stdout: `Fetched ${imageArtifacts.length} public images.`, stderr: "", exitCode: 0, durationMs: 0, sandbox: "web", artifacts: imageArtifacts } };
