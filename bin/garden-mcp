@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+connector=""
+action=""
+json='{}'
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -connector|--connector) connector="${2:-}"; shift 2 ;;
+    -action|--action|-actions|--actions) action="${2:-}"; shift 2 ;;
+    -json|--json) json="${2:-{}}"; shift 2 ;;
+    *) echo "Usage: garden-mcp -connector CONNECTOR_NAME -actions TOOL_NAME [-json JSON_ARGS]" >&2; exit 2 ;;
+  esac
+done
+if [[ -z "$connector" || -z "$action" ]]; then echo "connector and action are required" >&2; exit 2; fi
+if [[ -z "${GARDEN_MCP_BRIDGE_URL:-}" || -z "${GARDEN_MCP_EXECUTION_TOKEN:-}" ]]; then echo "This command must run inside an Agent Garden E2B execution with an approved connector bridge." >&2; exit 3; fi
+curl -fsS "$GARDEN_MCP_BRIDGE_URL" -H 'Content-Type: application/json' -H "X-Agent-Garden-Execution: $GARDEN_MCP_EXECUTION_TOKEN" --data "$(node -e 'const [c,a,j]=process.argv.slice(1); console.log(JSON.stringify({connector:c,action:a,arguments:JSON.parse(j||"{}")}))' "$connector" "$action" "$json")"

@@ -1,4 +1,5 @@
 import "dotenv/config";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { Sandbox } from "e2b";
@@ -60,9 +61,21 @@ const STORAGE_READY = Boolean(STORAGE_BUCKET && STORAGE_ENDPOINT && STORAGE_ACCE
 const storage = STORAGE_READY ? new S3Client({ region: STORAGE_REGION, endpoint: STORAGE_ENDPOINT, forcePathStyle: STORAGE_PROVIDER === "tigris", credentials: { accessKeyId: STORAGE_ACCESS_KEY_ID, secretAccessKey: STORAGE_SECRET_ACCESS_KEY } }) : null;
 const E2B_READY = Boolean(process.env.E2B_API_KEY);
 const executionProgress = new Map();
+const mcpOAuthStates = new Map();
+const mcpBridgeTokens = new Map();
+let mcpCatalogCache = { expiresAt: 0, data: null };
 const MAX_STORAGE_FILE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_UPLOAD_TYPES = new Set(["text/plain", "text/markdown", "text/csv", "text/xml", "text/javascript", "text/x-python", "text/x-sh", "application/pdf", "application/json", "application/xml", "application/zip", "application/x-zip-compressed", "application/gzip", "application/x-gzip", "application/x-tar", "application/octet-stream", "application/javascript", "application/typescript", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/html", "text/css", "image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"]);
 
+async function loadMcpCatalog() {
+  if (mcpCatalogCache.data && mcpCatalogCache.expiresAt > Date.now()) return mcpCatalogCache.data;
+  try {
+    const raw = await fs.readFile(path.join(__dirname, "data", "mcp-catalog.json"), "utf8");
+    const parsed = JSON.parse(raw); mcpCatalogCache = { data: parsed, expiresAt: Date.now() + 10 * 60 * 1000 }; return parsed;
+  } catch (error) { console.warn("MCP catalog unavailable:", error.message); return { count: 0, entries: [] }; }
+}
+function catalogEntryId(entry) { return String(entry?.id || entry?.registryName || "").slice(0, 240); }
+function oauthPkceChallenge(verifier) { return createHash("sha256").update(verifier).digest("base64url"); }
 function safeObjectName(name) {
   return path.basename(String(name || "file")).replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 140) || "file";
 }
@@ -885,14 +898,16 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
   let sandbox;
   try {
     sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 300000, allowInternetAccess: E2B_INTERNET_ENABLED });
+    const mcpBridgeToken = randomBytes(32).toString("hex"); const mcpBridgeUrl = `${process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL || "https://agent-garden-chat.onrender.com"}/api/mcp/bridge`; mcpBridgeTokens.set(mcpBridgeToken, { userId: String(userId), expiresAt: Date.now() + 5 * 60 * 1000 }); const mcpEnvPrefix = `export GARDEN_MCP_BRIDGE_URL='${mcpBridgeUrl}' GARDEN_MCP_EXECUTION_TOKEN='${mcpBridgeToken}'`;
     const extension = normalized.startsWith("python") || normalized === "py" ? "py" : normalized === "bash" || normalized === "sh" ? "sh" : "js";
     const sharePath = executionSharePath(userId);
     const codePath = `${sharePath}/agent-garden-${randomBytes(8).toString("hex")}.${extension}`;
     await sandbox.commands.run(`mkdir -p '${sharePath}'`, { timeoutMs: 10000 });
+    try { const gardenMcpScript = await fs.readFile(path.join(__dirname, "bin", "garden-mcp"), "utf8"); await sandbox.files.write(`${sharePath}/garden-mcp`, gardenMcpScript); await sandbox.commands.run(`chmod +x '${sharePath}/garden-mcp'`, { timeoutMs: 10000 }); } catch (error) { console.warn("Could not stage garden-mcp launcher:", error.message); }
     const stagedInputFiles = await stageUploadedFilesInE2B({ sandbox, sharePath, files: inputFiles });
     await sandbox.files.write(codePath, String(code));
-    const scriptCommand = extension === "py" ? `mkdir -p '${sharePath}' && cd '${sharePath}' && python3 '${codePath}'` : extension === "sh" ? `mkdir -p '${sharePath}' && cd '${sharePath}' && bash '${codePath}'` : `mkdir -p '${sharePath}' && cd '${sharePath}' && node '${codePath}'`;
-    const requestedCommands = Array.isArray(commands) ? commands.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8).map((item) => item.slice(0, 12000)).map((item) => /\bcd\s+['\"]?\//i.test(item) ? item : `cd '${sharePath}' && ${item}`) : [];
+    const scriptCommand = extension === "py" ? `${mcpEnvPrefix} && export PATH='${sharePath}':$PATH && mkdir -p '${sharePath}' && cd '${sharePath}' && python3 '${codePath}'` : extension === "sh" ? `${mcpEnvPrefix} && export PATH='${sharePath}':$PATH && mkdir -p '${sharePath}' && cd '${sharePath}' && bash '${codePath}'` : `${mcpEnvPrefix} && export PATH='${sharePath}':$PATH && mkdir -p '${sharePath}' && cd '${sharePath}' && node '${codePath}'`;
+    const requestedCommands = Array.isArray(commands) ? commands.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8).map((item) => item.slice(0, 12000)).map((item) => `${mcpEnvPrefix} && export PATH='${sharePath}':$PATH && ${/\bcd\s+['\"]?\//i.test(item) ? item : `cd '${sharePath}' && ${item}`}`) : [];
     const commandList = requestedCommands.length ? requestedCommands : [scriptCommand];
     const command = commandList.join("\\n");
     publishExecutionProgress(progressId, { userId: String(userId), phase: "running", language: normalized, command, commands: commandList, stdout: "", stderr: "", inputFiles: stagedInputFiles, network: E2B_INTERNET_ENABLED ? "internet-enabled" : "internet-disabled" });
@@ -931,6 +946,7 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
   } finally {
     try { if (sandbox && sharePath) await sandbox.commands.run(`rm -rf '${sharePath.replaceAll("'", "'\\''")}'`, { timeoutMs: 10000 }); } catch (cleanupError) { console.warn("E2B workspace cleanup warning:", cleanupError.message); }
     try { await sandbox?.kill(); } catch (killError) { console.warn("E2B sandbox shutdown warning:", killError.message); }
+    for (const [token, session] of mcpBridgeTokens.entries()) if (session.userId === String(userId) && session.expiresAt < Date.now() + 10 * 60 * 1000) mcpBridgeTokens.delete(token);
   }
 }
 
@@ -1242,6 +1258,55 @@ app.post("/api/storage/upload", requireUser, enforceActiveAccount, async (req, r
   } catch (error) { res.status(502).json({ error: error.message || `Could not upload the file to ${STORAGE_PROVIDER}.` }); }
 });
 
+app.post("/api/mcp/bridge", async (req, res) => {
+  const bridgeToken = String(req.headers["x-agent-garden-execution"] || ""); const session = mcpBridgeTokens.get(bridgeToken);
+  if (!session || session.expiresAt < Date.now()) return res.status(401).json({ error: "The E2B MCP bridge token is missing or expired." });
+  const connectorName = String(req.body?.connector || ""); const action = String(req.body?.action || ""); if (!connectorName || !action) return res.status(400).json({ error: "connector and action are required." });
+  try {
+    const data = await d1RequestWithRetry(`/v1/connectors/${encodeURIComponent(String(session.userId))}`); const connector = (data?.connectors || []).find((item) => String(item.id) === connectorName || String(item.name).toLowerCase() === connectorName.toLowerCase()); if (!connector || connector.kind !== "mcp" || connector.enabled === 0) return res.status(404).json({ error: "Approved MCP connector was not found." });
+    const config = unsealJson(connector.config_ciphertext || connector.configCiphertext) || {}; const secret = unseal(connector.secret_ciphertext || connector.secretCiphertext) || ""; const allowlist = Array.isArray(config.toolAllowlist) ? config.toolAllowlist : []; const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" }; if (secret) headers[String(connector.auth_header || connector.authHeader || "Authorization")] = String(connector.auth_header || connector.authHeader || "Authorization").toLowerCase() === "authorization" && !/^Bearer\s/i.test(secret) ? `Bearer ${secret}` : secret;
+    const call = async (method, params, id) => { const response = await fetch(String(connector.base_url || connector.baseUrl), { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }), signal: AbortSignal.timeout(30000) }); const text = await response.text(); let payload = {}; try { payload = JSON.parse(text); } catch { payload = { raw: text.slice(0, 20000) }; } if (!response.ok) throw new Error(`MCP ${method} returned HTTP ${response.status}.`); return payload; };
+    await call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "Agent Garden", version: "1.0.0" } }, 1).catch(() => null); const listed = await call("tools/list", {}, 2); const tools = listed?.result?.tools || []; if (action === "tools/list" || action === "list") return res.json({ ok: true, tools: tools.map((tool) => ({ name: tool.name, description: tool.description || "", inputSchema: tool.inputSchema || {} })) }); const tool = tools.find((candidate) => candidate.name === action); if (!tool) return res.status(403).json({ error: "The requested action is not advertised by this MCP server.", availableActions: tools.map((candidate) => candidate.name).slice(0, 100) }); if (allowlist.length && !allowlist.includes(action)) return res.status(403).json({ error: "The requested action is not enabled for this connector." }); const result = await call("tools/call", { name: action, arguments: req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {} }, 3); res.json({ ok: true, connector: connector.name, action, result: result.result || result });
+  } catch (error) { res.status(502).json({ error: error.message || "MCP bridge invocation failed." }); }
+});
+app.get("/api/mcp/catalog", requireUser, enforceActiveAccount, async (req, res) => {
+  const catalog = await loadMcpCatalog(); const query = String(req.query?.q || "").trim().toLowerCase(); const limit = Math.min(Math.max(Number(req.query?.limit || 240), 1), 500);
+  const entries = (catalog.entries || []).filter((entry) => !query || `${entry.title} ${entry.description} ${entry.registryName}`.toLowerCase().includes(query)).slice(0, limit).map((entry) => ({ ...entry, id: catalogEntryId(entry), connectable: Boolean(entry.remoteUrl), actions: Array.isArray(entry.actions) ? entry.actions : [] }));
+  res.json({ source: catalog.source, generatedAt: catalog.generatedAt, count: entries.length, total: catalog.count || entries.length, entries });
+});
+app.post("/api/mcp/catalog/:entryId/connect", requireUser, enforceActiveAccount, async (req, res) => {
+  const catalog = await loadMcpCatalog(); const entryId = decodeURIComponent(String(req.params.entryId)); const entry = (catalog.entries || []).find((candidate) => catalogEntryId(candidate) === entryId);
+  if (!entry) return res.status(404).json({ error: "MCP catalog entry not found." });
+  if (!entry.remoteUrl || !/^https:\/\//i.test(entry.remoteUrl)) return res.status(400).json({ error: "This catalog entry does not publish a verified remote MCP URL. Review the source and use Custom Connector with the official endpoint." });
+  try {
+    const probe = await fetch(entry.remoteUrl, { headers: { Accept: "application/json, text/event-stream" }, signal: AbortSignal.timeout(12000) });
+    const challenge = probe.headers.get("www-authenticate") || ""; const resourceMatch = challenge.match(/resource_metadata="([^"]+)"/i); const resourceMetadataUrl = resourceMatch?.[1] || `${new URL(entry.remoteUrl).origin}/.well-known/oauth-protected-resource`;
+    if (probe.ok && !challenge) {
+      const id = `connector_${randomBytes(12).toString("hex")}`; await d1RequestWithRetry("/v1/connectors", { method: "POST", body: JSON.stringify({ id, userId: req.user.sub, name: entry.title, kind: "mcp", baseUrl: entry.remoteUrl, authHeader: "Authorization", secretCiphertext: seal(""), configCiphertext: sealJson({ catalogId: entryId, transport: entry.transport, source: entry.registryUrl, toolAllowlist: [], oauth: false }), enabled: true }) });
+      return res.json({ connected: true, connectorId: id, message: "The remote MCP endpoint responded without OAuth and was added." });
+    }
+    const resourceResponse = await fetch(resourceMetadataUrl, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(12000) }); if (!resourceResponse.ok) throw new Error(`Protected resource metadata returned HTTP ${resourceResponse.status}.`);
+    const resource = await resourceResponse.json(); const authorizationServer = resource.authorization_servers?.[0]; if (!authorizationServer) throw new Error("The MCP server did not publish an authorization server.");
+    let oauthMeta = {}; for (const candidate of [`${authorizationServer.replace(/\/$/, "")}/.well-known/oauth-authorization-server`, `${authorizationServer.replace(/\/$/, "")}/.well-known/openid-configuration`]) { const metaResponse = await fetch(candidate, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10000) }).catch(() => null); if (metaResponse?.ok) { oauthMeta = await metaResponse.json(); break; } }
+    if (!oauthMeta.authorization_endpoint || !oauthMeta.token_endpoint) throw new Error("The MCP authorization server did not publish standard OAuth endpoints.");
+    let clientId = process.env.MCP_OAUTH_CLIENT_ID || ""; let clientSecret = process.env.MCP_OAUTH_CLIENT_SECRET || "";
+    if (!clientId && oauthMeta.registration_endpoint) { const registration = await fetch(oauthMeta.registration_endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client_name: "Agent Garden", redirect_uris: [`${process.env.AUTH0_BASE_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL}/api/mcp/oauth/callback`], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" }), signal: AbortSignal.timeout(12000) }); if (registration.ok) { const registered = await registration.json(); clientId = registered.client_id || ""; clientSecret = registered.client_secret || ""; } }
+    if (!clientId) return res.status(400).json({ error: "This MCP server requires a pre-registered OAuth client. Set the provider client ID/secret in Agent Garden or add it through Custom Connector form mode." });
+    const verifier = randomBytes(32).toString("base64url"); const state = randomBytes(24).toString("base64url"); const redirectUri = `${process.env.AUTH0_BASE_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL}/api/mcp/oauth/callback`; mcpOAuthStates.set(state, { userId: req.user.sub, entry, clientId, clientSecret, verifier, redirectUri, tokenEndpoint: oauthMeta.token_endpoint, createdAt: Date.now() });
+    const authUrl = new URL(oauthMeta.authorization_endpoint); authUrl.searchParams.set("response_type", "code"); authUrl.searchParams.set("client_id", clientId); authUrl.searchParams.set("redirect_uri", redirectUri); authUrl.searchParams.set("state", state); authUrl.searchParams.set("code_challenge", oauthPkceChallenge(verifier)); authUrl.searchParams.set("code_challenge_method", "S256"); authUrl.searchParams.set("resource", entry.remoteUrl); if (resource.scopes_supported?.length) authUrl.searchParams.set("scope", resource.scopes_supported.join(" "));
+    res.json({ connected: false, oauthRequired: true, authorizationUrl: authUrl.href, provider: entry.title });
+  } catch (error) { res.status(502).json({ error: error.message || "Could not discover the MCP OAuth flow." }); }
+});
+app.get("/api/mcp/oauth/callback", async (req, res) => {
+  const state = String(req.query?.state || ""); const pending = mcpOAuthStates.get(state); if (!pending || Date.now() - pending.createdAt > 10 * 60 * 1000) return res.status(400).send("This MCP authorization session expired. Return to Agent Garden and connect again."); mcpOAuthStates.delete(state);
+  if (req.query?.error) return res.status(400).send(`MCP authorization was not completed: ${String(req.query.error).slice(0, 160)}`);
+  try {
+    const body = new URLSearchParams({ grant_type: "authorization_code", code: String(req.query?.code || ""), redirect_uri: pending.redirectUri, client_id: pending.clientId, code_verifier: pending.verifier }); const headers = { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }; if (pending.clientSecret) headers.Authorization = `Basic ${Buffer.from(`${pending.clientId}:${pending.clientSecret}`).toString("base64")}`;
+    const tokenResponse = await fetch(pending.tokenEndpoint, { method: "POST", headers, body, signal: AbortSignal.timeout(15000) }); const token = await tokenResponse.json().catch(() => ({})); if (!tokenResponse.ok || !token.access_token) throw new Error(token.error_description || `Token endpoint returned HTTP ${tokenResponse.status}.`);
+    const id = `connector_${randomBytes(12).toString("hex")}`; await d1RequestWithRetry("/v1/connectors", { method: "POST", body: JSON.stringify({ id, userId: pending.userId, name: pending.entry.title, kind: "mcp", baseUrl: pending.entry.remoteUrl, authHeader: "Authorization", secretCiphertext: seal(String(token.access_token)), configCiphertext: sealJson({ catalogId: catalogEntryId(pending.entry), transport: pending.entry.transport, source: pending.entry.registryUrl, toolAllowlist: [], oauth: true, refreshToken: token.refresh_token || "", expiresAt: token.expires_in ? Date.now() + Number(token.expires_in) * 1000 : null }), enabled: true }) });
+    res.type("html").send("<script>window.close()</script><p>Agent Garden connected this MCP server. You can close this window.</p>");
+  } catch (error) { res.status(502).send(`Agent Garden could not store the MCP authorization: ${String(error.message || error).slice(0, 300)}`); }
+});
 app.get("/api/connectors", requireUser, enforceActiveAccount, async (req, res) => {
   try {
     const data = await d1RequestWithRetry(`/v1/connectors/${encodeURIComponent(String(req.user.sub))}`);
