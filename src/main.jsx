@@ -397,8 +397,11 @@ function App() {
     catch (error) { setNotice(error.message); } finally { setMcpCatalogLoading(false); }
   }, []);
   const connectMcpCatalogEntry = useCallback(async (entry) => {
-    try { const response = await fetch(`/api/mcp/catalog/${encodeURIComponent(entry.id)}/connect`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || "Could not connect MCP server."); if (data.authorizationUrl) window.open(data.authorizationUrl, "agent-garden-mcp-oauth", "popup,width=520,height=720"); else setNotice(data.message || `${entry.title} connected.`); await loadConnectors(); }
-    catch (error) { setNotice(error.message); }
+    const oauthWindow = window.open("about:blank", "agent-garden-mcp-oauth", "popup,width=520,height=720");
+    if (!oauthWindow) { setNotice("Your browser blocked the OAuth popup. Allow popups for Agent Garden and try Connect again."); return; }
+    oauthWindow.document.title = `Connect ${entry.title}`; oauthWindow.document.body.innerHTML = "<p style='font:14px system-ui;padding:24px'>Preparing secure authorization…</p>";
+    try { const response = await fetch(`/api/mcp/catalog/${encodeURIComponent(entry.id)}/connect`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || "Could not discover this MCP provider's OAuth flow."); if (data.authorizationUrl) { oauthWindow.location.href = data.authorizationUrl; } else { oauthWindow.close(); setNotice(data.message || `${entry.title} connected.`); await loadConnectors(); } }
+    catch (error) { oauthWindow.close(); setNotice(`${entry.title}: ${error.message}`); }
   }, [loadConnectors]);
   const saveConnector = useCallback(async (event) => {
     event.preventDefault(); setConnectorBusy(true); setNotice("");
