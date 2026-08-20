@@ -165,3 +165,62 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .admin-moderation-launcher:hover { background: #354264; transform: translateY(-1px); }
 .admin-moderation-launcher:disabled { opacity: .7; cursor: wait; }
 @media (max-width: 620px) { .admin-moderation-launcher { right: 12px; bottom: 74px; min-height: 34px; padding: 8px 10px; } .admin-moderation-launcher span { display: none; } }
+
+/* Connector workspace redesign */
+.connector-card { width: min(920px, calc(100vw - 34px)); max-height: min(900px, calc(100vh - 34px)); overflow: auto; padding: 26px; background: #151820; border: 1px solid #343b4f; }
+.connector-card .onboarding-header { align-items: flex-start; margin-bottom: 20px; }
+.connector-card .onboarding-header h2 { color: #f4f6fb; font-size: clamp(22px, 3vw, 30px); letter-spacing: -.045em; }
+.connector-card .onboarding-header p { max-width: 620px; color: #9da7ba; }
+.connector-catalog-toolbar { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+.connector-search-wrap { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; height: 44px; padding: 0 13px; border: 1px solid #3b455b; border-radius: 12px; background: #202633; color: #aebeff; }
+.connector-search-wrap:focus-within { border-color: #8395dd; box-shadow: 0 0 0 3px rgba(131,149,221,.12); }
+.connector-search-wrap span { font-size: 22px; line-height: 1; }
+.connector-search-wrap input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: #f1f4fb; font-size: 12px; }
+.connector-search-wrap input::placeholder { color: #7f899e; }
+.connector-primary-button, .connector-connect-button, .connector-review-button { min-height: 40px; padding: 0 14px; border-radius: 10px; font-size: 11px; font-weight: 800; transition: .16s ease; }
+.connector-primary-button { border: 1px solid #8295dd; background: #aebeff; color: #141826; white-space: nowrap; }
+.connector-primary-button:hover, .connector-connect-button:hover { background: #c4ceff; transform: translateY(-1px); }
+.connector-filter-row { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin: 14px 0 22px; }
+.connector-section-label { margin-right: 4px; color: #8994aa; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+.connector-filter { border: 1px solid #30394c; border-radius: 999px; padding: 7px 11px; color: #abb5c9; background: #1c222e; font-size: 10px; font-weight: 700; }
+.connector-filter:hover, .connector-filter.active { border-color: #7084cc; color: #e8edff; background: #2c3652; }
+.connector-form { margin: 0 0 24px; padding: 18px; border: 1px solid #30394b; border-radius: 15px; background: #1c212c; }
+.connector-form::before { content: "Custom connector"; display: block; margin-bottom: 13px; color: #dce4f5; font-size: 13px; font-weight: 800; }
+.connector-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.connector-form-grid label { display: grid; gap: 6px; color: #aab4c8; font-size: 10px; font-weight: 800; }
+.connector-form-grid input, .connector-form-grid select { width: 100%; min-height: 42px; padding: 0 11px; border: 1px solid #3b455a; border-radius: 9px; outline: 0; background: #131720; color: #eff3fb; font-size: 11px; }
+.connector-form-grid input:focus, .connector-form-grid select:focus { border-color: #8395dd; box-shadow: 0 0 0 3px rgba(131,149,221,.1); }
+.connector-form-grid input::placeholder { color: #69758c; }
+.connector-wide { grid-column: 1 / -1; }
+.connector-form .firebase-button { width: auto; min-width: 160px; margin-top: 15px; }
+.connector-list { display: grid; gap: 8px; margin-bottom: 22px; }
+.connector-list:empty { display: none; }
+.connector-list .workspace-file { border-color: #34405a; background: #1b2230; }
+.connector-list .workspace-file-info small { color: #8e9bb3; }
+.connector-catalog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 7px 0 12px; }
+.connector-catalog-heading > div { display: grid; gap: 4px; }
+.connector-catalog-heading strong { color: #edf1fb; font-size: 14px; }
+.connector-catalog-heading small { color: #8793a9; font-size: 10px; }
+.connector-catalog-badge { padding: 6px 9px; border: 1px solid #3e537d; border-radius: 999px; color: #aebeff; background: #222c44; font-size: 9px; font-weight: 800; letter-spacing: .06em; }
+.connector-catalog-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+.connector-provider-card { display: flex; min-width: 0; flex-direction: column; padding: 14px; border: 1px solid #303a50; border-radius: 14px; background: linear-gradient(160deg, #202736, #181d27); transition: border-color .16s, transform .16s, background .16s; }
+.connector-provider-card:hover { transform: translateY(-2px); border-color: #6275ae; background: linear-gradient(160deg, #273149, #1b2130); }
+.connector-provider-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.connector-logo { display: grid; place-items: center; width: 43px; height: 43px; overflow: hidden; border: 1px solid #46536e; border-radius: 12px; background: #f5f7fb; }
+.connector-logo img { width: 30px; height: 30px; object-fit: contain; }
+.connector-status { padding: 5px 7px; border-radius: 999px; font-size: 8px; font-weight: 900; letter-spacing: .08em; }
+.connector-status.ready { color: #8de5c5; border: 1px solid #326c60; background: #1c3b37; }
+.connector-status.review { color: #e5c78e; border: 1px solid #6f5b38; background: #3b3222; }
+.connector-provider-name { overflow: hidden; color: #f0f3f9; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.connector-provider-card p { display: -webkit-box; overflow: hidden; min-height: 45px; margin: 7px 0 12px; color: #919caf; font-size: 10px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.connector-provider-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: auto; margin-bottom: 12px; color: #7f8ca4; font-size: 9px; }
+.connector-connect-button, .connector-review-button { width: 100%; }
+.connector-connect-button { border: 1px solid #8295dd; background: #aebeff; color: #141826; }
+.connector-review-button { border: 1px solid #53627f; background: #283248; color: #d4defa; }
+.connector-review-button:hover { border-color: #8295dd; background: #354261; }
+.connector-loading, .connector-empty { display: grid; place-items: center; gap: 8px; min-height: 180px; border: 1px dashed #3c465d; border-radius: 14px; color: #8f9ab0; background: #191e28; font-size: 11px; text-align: center; }
+.connector-loading-dot { width: 10px; height: 10px; border: 2px solid #7082c5; border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+.connector-empty strong { color: #e1e7f4; font-size: 12px; }
+.connector-empty span { color: #818ca0; font-size: 10px; }
+@media (max-width: 780px) { .connector-catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .auth-overlay { padding: 10px; align-items: start; }.connector-card { width: 100%; max-height: calc(100vh - 20px); padding: 18px 14px; border-radius: 18px; }.connector-card .onboarding-header { margin-bottom: 15px; }.connector-card .onboarding-header h2 { font-size: 23px; }.connector-catalog-toolbar { align-items: stretch; flex-direction: column; }.connector-primary-button { width: 100%; }.connector-filter-row { margin-bottom: 17px; }.connector-form { padding: 14px; }.connector-form-grid { grid-template-columns: 1fr; gap: 10px; }.connector-wide { grid-column: auto; }.connector-form .firebase-button { width: 100%; }.connector-catalog-grid { grid-template-columns: 1fr; gap: 9px; }.connector-provider-card { padding: 13px; }.connector-provider-card p { min-height: auto; }.connector-catalog-heading { margin-top: 4px; } }
