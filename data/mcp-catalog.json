@@ -1,8 +1,57 @@
 {
-  "generatedAt": "2026-08-21T00:17:30.387Z",
+  "generatedAt": "2026-08-21T00:21:21.187Z",
   "source": "Official MCP Registry plus MCP.so directory listings",
-  "count": 1242,
+  "count": 1243,
   "entries": [
+    {
+      "id": "google.gmail/api",
+      "title": "Gmail",
+      "description": "Google’s official Gmail API connector for messages, threads, labels, drafts, and sending mail.",
+      "version": "v1",
+      "registryName": "google.gmail/api",
+      "official": true,
+      "registryUrl": "https://developers.google.com/workspace/gmail/api",
+      "iconUrl": "https://www.google.com/s2/favicons?domain=gmail.google.com&sz=128",
+      "transport": "HTTPS REST + Google OAuth 2.0",
+      "remoteUrl": "https://gmail.googleapis.com/gmail/v1/users/me",
+      "kind": "oauth-api",
+      "provider": "google-gmail",
+      "auth": "Google OAuth 2.0 with Gmail scopes; no API key is stored.",
+      "actions": [
+        "list_messages",
+        "get_message",
+        "list_threads",
+        "get_thread",
+        "list_labels",
+        "create_draft",
+        "send_message",
+        "modify_message"
+      ],
+      "actionPermissions": {
+        "read": [
+          "list_messages",
+          "get_message",
+          "list_threads",
+          "get_thread",
+          "list_labels"
+        ],
+        "write": [
+          "create_draft",
+          "modify_message"
+        ],
+        "sensitive": [
+          "send_message"
+        ]
+      },
+      "scopes": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send"
+      ],
+      "actionsDiscovery": "Official Gmail REST API reference",
+      "sourceUpdatedAt": "2026-08-21T00:21:21.186Z",
+      "source": "Gmail API official documentation"
+    },
     {
       "id": "higgsfield.ai/mcp",
       "title": "Higgsfield",
