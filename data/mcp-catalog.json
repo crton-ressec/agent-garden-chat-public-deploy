@@ -1,8 +1,98 @@
 {
-  "generatedAt": "2026-08-21T00:21:21.187Z",
+  "generatedAt": "2026-08-21T15:05:25.938Z",
   "source": "Official MCP Registry plus MCP.so directory listings",
-  "count": 1243,
+  "count": 1246,
   "entries": [
+    {
+      "id": "slack/api",
+      "title": "Slack",
+      "description": "Slack Web API connector for channels, messages, search, users, and workspace collaboration.",
+      "version": "v2",
+      "registryName": "slack/api",
+      "official": true,
+      "registryUrl": "https://docs.slack.dev/authentication/installing-with-oauth",
+      "iconUrl": "https://www.google.com/s2/favicons?domain=slack.com&sz=128",
+      "transport": "HTTPS REST + Slack OAuth v2",
+      "remoteUrl": "https://slack.com/api",
+      "kind": "oauth-api",
+      "provider": "slack",
+      "auth": "Slack OAuth v2; requires a Slack app client ID and secret.",
+      "scopes": [
+        "chat:write",
+        "channels:read",
+        "channels:history",
+        "users:read",
+        "search:read"
+      ],
+      "actions": [
+        "list_channels",
+        "read_messages",
+        "search_messages",
+        "send_message",
+        "list_users"
+      ],
+      "actionsDiscovery": "Official Slack Web API methods",
+      "sourceUpdatedAt": "2026-08-21T15:05:25.936Z",
+      "source": "Slack official developer documentation"
+    },
+    {
+      "id": "notion/api",
+      "title": "Notion",
+      "description": "Notion API connector for searching, reading, creating, and updating pages and databases.",
+      "version": "2026-03-11",
+      "registryName": "notion/api",
+      "official": true,
+      "registryUrl": "https://developers.notion.com/guides/get-started/authorization",
+      "iconUrl": "https://www.google.com/s2/favicons?domain=notion.so&sz=128",
+      "transport": "HTTPS REST + Notion OAuth 2.0",
+      "remoteUrl": "https://api.notion.com/v1",
+      "kind": "oauth-api",
+      "provider": "notion",
+      "auth": "Notion public connection OAuth 2.0; requires a Notion client ID and secret.",
+      "actions": [
+        "search",
+        "retrieve_page",
+        "create_page",
+        "update_page",
+        "query_database",
+        "list_users"
+      ],
+      "actionsDiscovery": "Official Notion REST API reference",
+      "sourceUpdatedAt": "2026-08-21T15:05:25.937Z",
+      "source": "Notion official developer documentation"
+    },
+    {
+      "id": "github/api",
+      "title": "GitHub",
+      "description": "GitHub API connector for repositories, issues, pull requests, files, and authenticated user data.",
+      "version": "2026-03-10",
+      "registryName": "github/api",
+      "official": true,
+      "registryUrl": "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps",
+      "iconUrl": "https://github.githubassets.com/favicons/favicon.svg",
+      "transport": "HTTPS REST + GitHub OAuth 2.0",
+      "remoteUrl": "https://api.github.com",
+      "kind": "oauth-api",
+      "provider": "github",
+      "auth": "GitHub OAuth web flow; GitHub recommends GitHub Apps for fine-grained permissions.",
+      "scopes": [
+        "read:user",
+        "user:email",
+        "repo"
+      ],
+      "actions": [
+        "get_user",
+        "list_repositories",
+        "get_repository",
+        "list_issues",
+        "create_issue",
+        "list_pull_requests",
+        "get_file"
+      ],
+      "actionsDiscovery": "Official GitHub REST API reference",
+      "sourceUpdatedAt": "2026-08-21T15:05:25.937Z",
+      "source": "GitHub official documentation"
+    },
     {
       "id": "google.gmail/api",
       "title": "Gmail",
