@@ -1,8 +1,73 @@
 {
-  "generatedAt": "2026-08-19T15:49:54.385Z",
+  "generatedAt": "2026-08-21T00:17:30.387Z",
   "source": "Official MCP Registry plus MCP.so directory listings",
-  "count": 1239,
+  "count": 1242,
   "entries": [
+    {
+      "id": "higgsfield.ai/mcp",
+      "title": "Higgsfield",
+      "description": "Official Higgsfield MCP for image and video generation, creative workflows, and generation history.",
+      "version": "current",
+      "registryName": "higgsfield.ai/mcp",
+      "official": true,
+      "registryUrl": "https://higgsfield.ai/mcp",
+      "iconUrl": "https://higgsfield.ai/icon.png",
+      "transport": "streamable-http",
+      "remoteUrl": "https://mcp.higgsfield.ai/mcp",
+      "kind": "mcp",
+      "auth": "OAuth through the Higgsfield account; no API key required.",
+      "actions": [
+        "generate_image",
+        "generate_video",
+        "list_generations"
+      ],
+      "actionsDiscovery": "MCP tools/list after OAuth connection",
+      "sourceUpdatedAt": "2026-08-21T00:17:30.387Z",
+      "source": "Higgsfield official MCP page"
+    },
+    {
+      "id": "google.developer-knowledge/mcp",
+      "title": "Google Developer Knowledge",
+      "description": "Google’s official remote MCP server for searching and retrieving developer documentation.",
+      "version": "current",
+      "registryName": "google.developer-knowledge/mcp",
+      "official": true,
+      "registryUrl": "https://developers.google.com/knowledge/reference/mcp",
+      "iconUrl": "https://www.google.com/s2/favicons?domain=developers.google.com&sz=128",
+      "transport": "streamable-http",
+      "remoteUrl": "https://developerknowledge.googleapis.com/mcp",
+      "kind": "mcp",
+      "auth": "Google Cloud MCP authentication and enabled service required.",
+      "actions": [
+        "search_documents",
+        "answer_query",
+        "get_documents"
+      ],
+      "actionsDiscovery": "Official tools/list reference",
+      "sourceUpdatedAt": "2026-08-21T00:17:30.387Z",
+      "source": "Google Developers official documentation"
+    },
+    {
+      "id": "google.gemini/api",
+      "title": "Google Gemini API",
+      "description": "Google’s official Gemini API for text, multimodal, image, and agent workflows.",
+      "version": "current",
+      "registryName": "google.gemini/api",
+      "official": true,
+      "registryUrl": "https://ai.google.dev/gemini-api/docs",
+      "iconUrl": "https://www.google.com/s2/favicons?domain=ai.google.dev&sz=128",
+      "transport": "HTTPS REST",
+      "remoteUrl": "https://generativelanguage.googleapis.com/v1beta/interactions",
+      "kind": "api",
+      "auth": "API key in the x-goog-api-key header.",
+      "actions": [
+        "interactions.create",
+        "models.list"
+      ],
+      "actionsDiscovery": "Official Gemini API documentation",
+      "sourceUpdatedAt": "2026-08-21T00:17:30.386Z",
+      "source": "Google AI official documentation"
+    },
     {
       "id": "ac.inference.sh/mcp",
       "title": "inference.sh",

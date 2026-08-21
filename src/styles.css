@@ -224,3 +224,5 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .connector-empty span { color: #818ca0; font-size: 10px; }
 @media (max-width: 780px) { .connector-catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 620px) { .auth-overlay { padding: 10px; align-items: start; }.connector-card { width: 100%; max-height: calc(100vh - 20px); padding: 18px 14px; border-radius: 18px; }.connector-card .onboarding-header { margin-bottom: 15px; }.connector-card .onboarding-header h2 { font-size: 23px; }.connector-catalog-toolbar { align-items: stretch; flex-direction: column; }.connector-primary-button { width: 100%; }.connector-filter-row { margin-bottom: 17px; }.connector-form { padding: 14px; }.connector-form-grid { grid-template-columns: 1fr; gap: 10px; }.connector-wide { grid-column: auto; }.connector-form .firebase-button { width: 100%; }.connector-catalog-grid { grid-template-columns: 1fr; gap: 9px; }.connector-provider-card { padding: 13px; }.connector-provider-card p { min-height: auto; }.connector-catalog-heading { margin-top: 4px; } }
+
+.connector-status.api { color: #b7c8ff; border: 1px solid #53699e; background: #263455; }
