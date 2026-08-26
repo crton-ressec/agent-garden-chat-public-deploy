@@ -724,6 +724,13 @@ async function handleAdminCommand({ message, user }) {
     return { answer: `## Appeal action completed\n\nAppeal **${appealMatch[1]}** was marked **${status}**.`, provider: "Admin Control", sources: [], adminAction: status };
   }
   const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase();
+  if (email && /\b(notify|message|contact|send)\b/i.test(text) && !/\b(?:ban|suspend|unsuspend|un-suspend|unban|reinstate|reactivate|activate|restore)\b/i.test(text)) {
+    const overview = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) }); const target = (overview?.users || []).find((candidate) => String(candidate.email || "").toLowerCase() === email);
+    if (!target) return { answer: `I could not find an account for **${email}**. No notification was sent.`, provider: "Admin Control", sources: [], adminAction: "not_found" };
+    const body = text.replace(email, "").replace(/\b(notify|message|contact|send)\b/i, "").replace(/^\s*(the user|them|that|saying|with)\s*[:,-]?\s*/i, "").trim() || "Please review the latest update in your Agent Garden account.";
+    const sent = await d1Request("/v1/admin/notify", { method: "POST", body: JSON.stringify({ adminUserId: user.sub, userId: target.id, title: "Message from Agent Garden admin", body }) });
+    return { answer: `## Notification delivered\n\nAn in-app notification was delivered to **${sent?.email || email}** and recorded by the database.`, provider: "Admin Control", sources: [], adminAction: "notify" };
+  }
   const moderationWords = "ban|suspend|unsuspend|un-suspend|unban|reinstate|reactivate|activate|restore";
   if (!email && new RegExp(`\\b(${moderationWords})\\b`, "i").test(text)) return { answer: "For safety, provide the target user’s exact email address. No moderation action was taken.", provider: "Admin Control", sources: [], adminAction: "needs_target" };
   if (email && new RegExp(`\\b(${moderationWords})\\b`, "i").test(text)) {
@@ -734,8 +741,7 @@ async function handleAdminCommand({ message, user }) {
     if (!target) return { answer: `I could not find an account for **${email}**. No moderation action was taken.`, provider: "Admin Control", sources: [], adminAction: "not_found" };
     const updated = await d1Request(`/v1/admin/users/${encodeURIComponent(target.id)}`, { method: "PATCH", body: JSON.stringify({ adminUserId: user.sub, status, reason }) });
     const verifiedStatus = String(updated?.user?.status || updated?.status || status);
-    await createUserNotification({ userId: target.id, type: verifiedStatus === "active" ? "account" : "moderation", title: verifiedStatus === "active" ? "Account restored" : "Account suspended", body: verifiedStatus === "active" ? "An administrator restored access to your Agent Garden account." : reason });
-    return { answer: `## User status updated\\n\\n**${email}** is now **${verifiedStatus === "suspended" ? "banned/suspended" : "active"}**.\\n\\nReason: ${reason}\\n\\nThe database confirmed the new status.`, provider: "Admin Control", sources: [], adminAction: verifiedStatus };
+    return { answer: `## User status updated\\n\\n**${email}** is now **${verifiedStatus === "suspended" ? "banned/suspended" : "active"}**.\\n\\nReason: ${reason}\\n\\nThe database confirmed the new status and sent an in-app notification.`, provider: "Admin Control", sources: [], adminAction: verifiedStatus };
   }
   if (/\b(admin|moderation|safety)\b/i.test(lower) && /\b(reports?|users?|status|overview|dashboard)\b/i.test(lower)) {
     const data = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) });
