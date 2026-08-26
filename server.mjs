@@ -145,7 +145,7 @@ async function d1Request(pathname, options = {}) {
     signal: AbortSignal.timeout(12000),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `D1 Worker returned ${response.status}.`);
+  if (!response.ok) { const error = new Error(data.error || `D1 Worker returned ${response.status}.`); error.status = response.status; error.details = data; throw error; }
   return data;
 }
 
@@ -161,15 +161,42 @@ async function d1RequestWithRetry(pathname, options = {}) {
   throw lastError;
 }
 
+async function getDailyCredits(userId) {
+  if (!process.env.D1_WORKER_URL || !userId || String(userId) === "temporary-test-user") return null;
+  return d1Request(`/v1/credits/${encodeURIComponent(String(userId))}`, { headers: { "x-agent-garden-user": String(userId) } });
+}
+
+async function reserveDailyCredit(userId, requestId, reason = "chat_turn") {
+  if (!process.env.D1_WORKER_URL || !userId || String(userId) === "temporary-test-user") return null;
+  return d1RequestWithRetry("/v1/credits/reserve", { method: "POST", headers: { "x-agent-garden-user": String(userId) }, body: JSON.stringify({ userId: String(userId), requestId: String(requestId), amount: 1, reason }) });
+}
+
+async function createUserNotification({ userId, type = "info", title, body, actionUrl = null }) {
+  if (!process.env.D1_WORKER_URL || !userId || !title || !body) return null;
+  try {
+    return await d1RequestWithRetry("/v1/notifications", { method: "POST", body: JSON.stringify({ userId: String(userId), type, title: String(title).slice(0, 160), body: String(body).slice(0, 4000), actionUrl: actionUrl ? String(actionUrl).slice(0, 500) : null }) });
+  } catch (error) {
+    console.warn("Notification persistence unavailable:", error.message);
+    return null;
+  }
+}
+
 async function persistChatTurn({ chatId, userId, title, agentId, provider, requestedProvider, userContent, userMetadata, assistantContent, assistantMetadata }) {
-  const payload = { chatId, userId, title, agentId, provider, requestedProvider, userContent: seal(userContent), userMetadata, assistantContent: seal(assistantContent), assistantMetadata };
+  const sealedUser = seal(userContent);
+  const sealedAssistant = seal(assistantContent);
+  const payload = { chatId, userId, title, agentId, provider, requestedProvider, userContent: sealedUser, userMetadata, assistantContent: sealedAssistant, assistantMetadata };
   try {
     return await d1RequestWithRetry("/v1/turn", { method: "POST", body: JSON.stringify(payload) });
   } catch (turnError) {
     console.warn("Atomic D1 turn persistence unavailable; falling back to individual writes:", turnError.message);
-    await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId, title, agentId, provider }) });
-    await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId, role: "user", content: userContent, agentId, provider: requestedProvider, metadata: userMetadata }) });
-    return await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `msg_${randomBytes(12).toString("hex")}`, chatId, userId, role: "assistant", content: assistantContent, agentId, provider, metadata: assistantMetadata }) });
+    try {
+      await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId, title, agentId, provider }) });
+      await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ chatId, userId, role: "user", content: sealedUser, agentId, provider: requestedProvider, metadata: userMetadata }) });
+      return await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ chatId, userId, role: "assistant", content: sealedAssistant, agentId, provider, metadata: assistantMetadata }) });
+    } catch (fallbackError) {
+      console.error("Fallback chat persistence failed:", fallbackError.message);
+      throw fallbackError;
+    }
   }
 }
 
@@ -186,7 +213,7 @@ async function indexWorkspaceArtifacts(userId, artifacts, content = "Workspace a
   if (!normalized.length) return;
   const chatId = `workspace_files_${String(userId)}`;
   await d1RequestWithRetry("/v1/chats", { method: "POST", body: JSON.stringify({ id: chatId, userId: String(userId), title: "Workspace files", agentId: "storage", provider: STORAGE_PROVIDER }) });
-  await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ id: `file_index_${randomBytes(12).toString("hex")}`, chatId, userId: String(userId), role: "assistant", content: String(content).slice(0, 500), agentId: "storage", provider: STORAGE_PROVIDER, metadata: { artifacts: normalized } }) });
+  await d1RequestWithRetry("/v1/messages", { method: "POST", body: JSON.stringify({ chatId, userId: String(userId), role: "assistant", content: seal(String(content).slice(0, 500)), agentId: "storage", provider: STORAGE_PROVIDER, metadata: { artifacts: normalized } }) });
 }
 
 async function signedWorkspaceFiles(artifacts) {
@@ -697,13 +724,18 @@ async function handleAdminCommand({ message, user }) {
     return { answer: `## Appeal action completed\n\nAppeal **${appealMatch[1]}** was marked **${status}**.`, provider: "Admin Control", sources: [], adminAction: status };
   }
   const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase();
-  if (!email && /\b(ban|suspend|unban|reinstate|activate)\b/i.test(text)) return { answer: "For safety, provide the target user’s exact email address. No moderation action was taken.", provider: "Admin Control", sources: [], adminAction: "needs_target" };
-  if (email && /\b(ban|suspend|unban|reinstate|activate)\b/i.test(text)) {
-    const status = /\b(unban|reinstate|activate)\b/i.test(text) ? "active" : "suspended"; const reason = String(text.replace(email, "")).replace(/\b(ban|suspend|unban|reinstate|activate)\b/i, "").trim() || (status === "active" ? "Restored by administrator." : "Suspended by administrator after moderation review.");
+  const moderationWords = "ban|suspend|unsuspend|un-suspend|unban|reinstate|reactivate|activate|restore";
+  if (!email && new RegExp(`\\b(${moderationWords})\\b`, "i").test(text)) return { answer: "For safety, provide the target user’s exact email address. No moderation action was taken.", provider: "Admin Control", sources: [], adminAction: "needs_target" };
+  if (email && new RegExp(`\\b(${moderationWords})\\b`, "i").test(text)) {
+    const restoreRequested = /\b(unsuspend|un-suspend|unban|reinstate|reactivate|activate|restore)\b/i.test(text);
+    const status = restoreRequested ? "active" : "suspended";
+    const reason = String(text.replace(email, "")).replace(new RegExp(`\\b(${moderationWords})\\b`, "i"), "").trim() || (restoreRequested ? "Restored by administrator." : "Suspended by administrator after moderation review.");
     const overview = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) }); const target = (overview?.users || []).find((candidate) => String(candidate.email || "").toLowerCase() === email);
     if (!target) return { answer: `I could not find an account for **${email}**. No moderation action was taken.`, provider: "Admin Control", sources: [], adminAction: "not_found" };
-    await d1Request(`/v1/admin/users/${encodeURIComponent(target.id)}`, { method: "PATCH", body: JSON.stringify({ adminUserId: user.sub, status, reason }) });
-    return { answer: `## User status updated\n\n**${email}** is now **${status === "suspended" ? "banned/suspended" : "active"}**.\n\nReason: ${reason}`, provider: "Admin Control", sources: [], adminAction: status };
+    const updated = await d1Request(`/v1/admin/users/${encodeURIComponent(target.id)}`, { method: "PATCH", body: JSON.stringify({ adminUserId: user.sub, status, reason }) });
+    const verifiedStatus = String(updated?.user?.status || updated?.status || status);
+    await createUserNotification({ userId: target.id, type: verifiedStatus === "active" ? "account" : "moderation", title: verifiedStatus === "active" ? "Account restored" : "Account suspended", body: verifiedStatus === "active" ? "An administrator restored access to your Agent Garden account." : reason });
+    return { answer: `## User status updated\\n\\n**${email}** is now **${verifiedStatus === "suspended" ? "banned/suspended" : "active"}**.\\n\\nReason: ${reason}\\n\\nThe database confirmed the new status.`, provider: "Admin Control", sources: [], adminAction: verifiedStatus };
   }
   if (/\b(admin|moderation|safety)\b/i.test(lower) && /\b(reports?|users?|status|overview|dashboard)\b/i.test(lower)) {
     const data = await d1Request("/v1/admin/overview", { method: "POST", body: JSON.stringify({ adminUserId: user.sub }) });
@@ -1216,6 +1248,18 @@ app.post("/api/profile/onboarding", requireUser, enforceActiveAccount, async (re
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+app.get("/api/credits", requireUser, async (req, res) => {
+  try { res.json((await getDailyCredits(req.user.sub)) || { credits: null }); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not load daily credits." }); }
+});
+app.get("/api/notifications", requireUser, async (req, res) => {
+  try { res.json((await d1Request(`/v1/notifications/${encodeURIComponent(req.user.sub)}`, { headers: { "x-agent-garden-user": String(req.user.sub) } })) || { notifications: [], unreadCount: 0 }); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not load notifications." }); }
+});
+app.patch("/api/notifications/:notificationId", requireUser, async (req, res) => {
+  try { res.json((await d1Request(`/v1/notifications/${encodeURIComponent(req.params.notificationId)}`, { method: "PATCH", headers: { "x-agent-garden-user": String(req.user.sub) }, body: JSON.stringify({ userId: req.user.sub, read: req.body?.read !== false }) })) || { ok: true }); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not update notification." }); }
+});
 app.post("/api/appeals", requireUser, async (req, res) => {
   const text = String(req.body?.text || "").trim();
   if (text.length < 10 || text.length > 10000) return res.status(400).json({ error: "Appeals must be between 10 and 10,000 characters." });
@@ -1232,9 +1276,21 @@ app.patch("/api/admin/users/:userId", requireUser, requireAdmin, async (req, res
   const status = ["suspended", "banned"].includes(String(req.body?.status || "").toLowerCase()) ? "suspended" : req.body?.status === "active" ? "active" : null;
   if (!status) return res.status(400).json({ error: "Status must be active, suspended, or banned." });
   try { res.json(await d1Request(`/v1/admin/users/${encodeURIComponent(req.params.userId)}`, { method: "PATCH", body: JSON.stringify({ adminUserId: req.user.sub, status, reason: String(req.body?.reason || "").slice(0, 2000) }) })); }
-  catch (error) { res.status(502).json({ error: error.message || "Could not update user status." }); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not update user status.", details: error.details || null }); }
 });
 
+app.patch("/api/admin/reports/:reportId", requireUser, requireAdmin, async (req, res) => {
+  const status = ["open", "reviewed", "dismissed"].includes(String(req.body?.status || "")) ? String(req.body.status) : null;
+  if (!status) return res.status(400).json({ error: "Report status must be open, reviewed, or dismissed." });
+  try { res.json(await d1Request(`/v1/admin/reports/${encodeURIComponent(req.params.reportId)}`, { method: "PATCH", body: JSON.stringify({ adminUserId: req.user.sub, status }) })); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not update the safety report." }); }
+});
+app.post("/api/admin/notify", requireUser, requireAdmin, async (req, res) => {
+  const userId = String(req.body?.userId || ""); const title = String(req.body?.title || "").trim(); const body = String(req.body?.body || "").trim();
+  if (!userId || !title || !body) return res.status(400).json({ error: "Target user, title, and message are required." });
+  try { res.json(await d1Request("/v1/admin/notify", { method: "POST", body: JSON.stringify({ adminUserId: req.user.sub, userId, title, body, actionUrl: req.body?.actionUrl || null }) })); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not notify the user." }); }
+});
 app.patch("/api/admin/appeals/:appealId", requireUser, requireAdmin, async (req, res) => {
   const status = req.body?.status === "approved" ? "approved" : req.body?.status === "denied" ? "denied" : null;
   if (!status) return res.status(400).json({ error: "Decision must be approved or denied." });
@@ -1509,6 +1565,14 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
   const { agent, routingReason, casual, execute, generateCode } = resolveAgent(requestedAgentId, message, files);
   if (!message && !files.length) return res.status(400).json({ error: "Write a message or attach a file first." });
   if (message.length > 12000) return res.status(400).json({ error: "Please keep messages under 12,000 characters." });
+  const requestId = String(req.body?.requestId || req.body?.executionId || randomBytes(16).toString("hex"));
+  let creditStatus = null;
+  try {
+    creditStatus = await reserveDailyCredit(req.user.sub, requestId, execute ? "execution_request" : "chat_turn");
+  } catch (creditError) {
+    if (creditError.status === 402) return res.status(402).json({ error: "Daily credit limit reached. Your 1,000 credits will reset at midnight Eastern Time.", credits: creditError.details?.credits || null });
+    console.warn("Credit reservation unavailable:", creditError.message);
+  }
   let enrichedMessage = message;
   const memoryContext = await loadAiMemory(req.user.sub);
   const connectorContext = await loadConnectorContext(req.user.sub);
@@ -1625,7 +1689,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
     result.sources = [...(result.sources || []), ...(webSearchContext?.sources || [])].filter((source, index, list) => source?.uri && list.findIndex((item) => item.uri === source.uri) === index).slice(0, 10);
     const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
     const chatTitle = conversationTitle(message);
-    const responsePayload = { ...result, agent: agent.id, routingReason, chatId, chatTitle, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
+    const responsePayload = { ...result, agent: agent.id, routingReason, chatId, chatTitle, requestId, credits: creditStatus?.credits || null, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
 
     try {
       await persistChatTurn({
