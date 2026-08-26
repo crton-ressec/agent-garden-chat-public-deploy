@@ -980,7 +980,7 @@ function availabilityFallbackResult(message) {
   };
 }
 
-async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false }) {
+async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false, onChunk }) {
   if (!gemini) throw new Error("Gemini is not configured on the server.");
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
   const contents = [
@@ -997,8 +997,19 @@ async function callGemini({ agent, message, history, files, systemContext = "", 
   const generate = async (requestConfig) => {
     let lastError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      try { return await gemini.models.generateContent({ model, contents, config: requestConfig }); }
-      catch (error) {
+      try {
+        if (onChunk && !requestConfig.tools) {
+          const result = await gemini.models.generateContentStream({ model, contents, config: requestConfig });
+          let fullText = "";
+          for await (const chunk of result.stream) {
+            const chunkText = chunk.text();
+            fullText += chunkText;
+            onChunk(chunkText);
+          }
+          return await result.response;
+        }
+        return await gemini.models.generateContent({ model, contents, config: requestConfig });
+      } catch (error) {
         lastError = error;
         if (!isTransientGeminiError(error) || attempt === 1) throw normalizedGeminiError(error);
         await new Promise((resolve) => setTimeout(resolve, 600));
@@ -1024,7 +1035,7 @@ async function callGemini({ agent, message, history, files, systemContext = "", 
   return { answer, provider: "Gemini", sources: citationsFrom(response), researchNotice };
 }
 
-async function callPollinations({ agent, message, history, files, systemContext = "" }) {
+async function callPollinations({ agent, message, history, files, systemContext = "", onChunk }) {
   if (Array.isArray(files) && files.length) {
     throw new Error("Pollinations fallback cannot analyze attachments. Please retry when Gemini is available.");
   }
@@ -1043,6 +1054,7 @@ async function callPollinations({ agent, message, history, files, systemContext 
         { role: "user", content: message },
       ],
       temperature: 0.7,
+      stream: Boolean(onChunk),
     }),
     signal: AbortSignal.timeout(45000),
   });
@@ -1051,9 +1063,33 @@ async function callPollinations({ agent, message, history, files, systemContext 
     error.code = "POLLINATIONS_QUEUE_FULL";
     throw error;
   }
-  if (!response.ok) throw new Error(`Pollinations fallback returned ${response.status}.`);
-  const body = await response.json();
-  const answer = body?.choices?.[0]?.message?.content?.trim();
+  if (!response.ok) throw new Error(`Pollinations returned HTTP ${response.status}.`);
+  if (onChunk) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value);
+      const lines = chunk.split("\n");
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (data === "[DONE]") break;
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices[0].delta?.content || "";
+            fullText += delta;
+            onChunk(delta);
+          } catch {}
+        }
+      }
+    }
+    return { answer: fullText.trim(), provider: "Pollinations", sources: [] };
+  }
+  const result = await response.json();
+  const answer = result.choices[0]?.message?.content?.trim();
   if (!answer) throw new Error("Pollinations returned an empty response.");
   return { answer, provider: "Pollinations", sources: [] };
 }
@@ -1531,7 +1567,14 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       }
     } else if (requestedProvider === "pollinations") {
       try {
-        result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext });
+        const onChunk = req.body?.stream ? (chunk) => res.write(`data: ${JSON.stringify({ type: "chunk", content: chunk })}\n\n`) : null;
+        if (onChunk) {
+          res.setHeader("Content-Type", "text/event-stream");
+          res.setHeader("Cache-Control", "no-cache");
+          res.setHeader("Connection", "keep-alive");
+          res.flushHeaders();
+        }
+        result = await callPollinations({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, onChunk });
       } catch (pollinationsError) {
         if (files.length || pollinationsError.code !== "POLLINATIONS_QUEUE_FULL") throw pollinationsError;
         try {
@@ -1544,7 +1587,14 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       }
     } else {
       try {
-        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext) });
+        const onChunk = req.body?.stream ? (chunk) => res.write(`data: ${JSON.stringify({ type: "chunk", content: chunk })}\n\n`) : null;
+        if (onChunk) {
+          res.setHeader("Content-Type", "text/event-stream");
+          res.setHeader("Cache-Control", "no-cache");
+          res.setHeader("Connection", "keep-alive");
+          res.flushHeaders();
+        }
+        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk });
       } catch (geminiError) {
         if (agent.search && geminiError.code === "LIVE_SEARCH_UNAVAILABLE") {
           result = { answer: "I couldn’t retrieve live web sources for this request, so I’m not going to present a potentially outdated answer. Please retry or configure a search connector in Workspace Connectors.", provider: "Research unavailable", sources: [], researchNotice: "Live search failed; no stale knowledge-cutoff answer was generated." };
@@ -1573,15 +1623,15 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       }
     }
     result.sources = [...(result.sources || []), ...(webSearchContext?.sources || [])].filter((source, index, list) => source?.uri && list.findIndex((item) => item.uri === source.uri) === index).slice(0, 10);
-    const responsePayload = { ...result, agent: agent.id, routingReason, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
     const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
-    responsePayload.chatId = chatId;
-    responsePayload.chatTitle = conversationTitle(message);
+    const chatTitle = conversationTitle(message);
+    const responsePayload = { ...result, agent: agent.id, routingReason, chatId, chatTitle, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
+
     try {
       await persistChatTurn({
         chatId,
         userId: req.user.sub,
-        title: conversationTitle(message),
+        title: chatTitle,
         agentId: agent.id,
         provider: result.provider,
         requestedProvider,
@@ -1596,7 +1646,12 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       responsePayload.persistenceStatus = "unavailable";
       responsePayload.persistenceNotice = "The reply completed, but the database could not save this turn. The chat ID was preserved so it can be retried on the next message.";
     }
-    res.json(responsePayload);
+    if (req.body?.stream) {
+      res.write(`data: ${JSON.stringify({ type: "done", payload: responsePayload })}\n\n`);
+      res.end();
+    } else {
+      res.json(responsePayload);
+    }
   } catch (error) {
     res.status(502).json({ error: error.message || "The selected provider could not complete the request." });
   }
