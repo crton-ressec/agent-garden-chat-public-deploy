@@ -857,51 +857,55 @@ function App() {
         createdAt: formatTime(),
       }]);
 
+      let sseBuffer = "";
+      const handleSseEvent = (event) => {
+        const line = event.split("\n").find((candidate) => candidate.startsWith("data: "));
+        if (!line) return;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === "chunk") {
+            fullContent += data.content;
+            setMessages((current) => current.map((m) => (m.id === assistantMessageId ? { ...m, content: fullContent } : m)));
+          } else if (data.type === "error") {
+            const streamError = data.error || "The provider could not complete this request. No credit was charged.";
+            fullContent = streamError;
+            setNotice(streamError);
+            setMessages((current) => current.map((m) => (m.id === assistantMessageId ? { ...m, content: streamError, provider: "Availability fallback" } : m)));
+          } else if (data.type === "done") {
+            const final = data.payload;
+            if (final.chatId) setChatId(final.chatId);
+            if (final.credits) setCredits(final.credits);
+            if (!chatId) setChatTitle(final.chatTitle || message.slice(0, 60) || "New conversation");
+            if (final.persistenceNotice) setNotice(final.persistenceNotice);
+            loadRecentChats();
+            if (final.execution) setChatExecutionLive((current) => ({ ...(current || {}), ...final.execution, active: false, phase: final.execution.status === "awaiting_code" ? "awaiting_code" : "completed", elapsed: Math.round((final.execution.durationMs || 0) / 1000) }));
+            setMessages((current) => current.map((m) => (m.id === assistantMessageId ? {
+              ...m,
+              content: final.answer,
+              provider: final.provider,
+              agent: final.agent,
+              sources: final.sources || [],
+              execution: final.execution || null,
+              fallbackReason: final.fallbackReason,
+              researchNotice: final.researchNotice,
+              routingReason: final.routingReason,
+            } : m)));
+            const routedLabel = config.agents.find((agent) => agent.id === final.agent)?.label || taskName;
+            setAgentLog((current) => current.map((item, index) => (index === current.length - 1
+              ? { ...item, label: `${taskName} → ${routedLabel} completed`, status: "done" }
+              : item)));
+          }
+        } catch (e) { console.warn("Stream parse error:", e); }
+      };
       while (true) {
         const { done, value } = await reader.read();
+        sseBuffer += decoder.decode(value || new Uint8Array(), { stream: !done }).replace(/\r\n/g, "\n");
+        const events = sseBuffer.split("\n\n");
+        sseBuffer = events.pop() || "";
+        events.forEach(handleSseEvent);
         if (done) break;
-        const chunk = decoder.decode(value);
-        const lines = chunk.split("\n");
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === "chunk") {
-                fullContent += data.content;
-                setMessages((current) => current.map((m) => (m.id === assistantMessageId ? { ...m, content: fullContent } : m)));
-              } else if (data.type === "error") {
-                const streamError = data.error || "The provider could not complete this request. No credit was charged.";
-                fullContent = streamError;
-                setNotice(streamError);
-                setMessages((current) => current.map((m) => (m.id === assistantMessageId ? { ...m, content: streamError, provider: "Availability fallback" } : m)));
-              } else if (data.type === "done") {
-                const final = data.payload;
-                if (final.chatId) setChatId(final.chatId);
-                if (final.credits) setCredits(final.credits);
-                if (!chatId) setChatTitle(final.chatTitle || message.slice(0, 60) || "New conversation");
-                if (final.persistenceNotice) setNotice(final.persistenceNotice);
-                loadRecentChats();
-                if (final.execution) setChatExecutionLive((current) => ({ ...(current || {}), ...final.execution, active: false, phase: final.execution.status === "awaiting_code" ? "awaiting_code" : "completed", elapsed: Math.round((final.execution.durationMs || 0) / 1000) }));
-                setMessages((current) => current.map((m) => (m.id === assistantMessageId ? {
-                  ...m,
-                  content: final.answer,
-                  provider: final.provider,
-                  agent: final.agent,
-                  sources: final.sources || [],
-                  execution: final.execution || null,
-                  fallbackReason: final.fallbackReason,
-                  researchNotice: final.researchNotice,
-                  routingReason: final.routingReason,
-                } : m)));
-                const routedLabel = config.agents.find((agent) => agent.id === final.agent)?.label || taskName;
-                setAgentLog((current) => current.map((item, index) => (index === current.length - 1
-                  ? { ...item, label: `${taskName} → ${routedLabel} completed`, status: "done" }
-                  : item)));
-              }
-            } catch (e) { console.warn("Stream parse error:", e); }
-          }
-        }
       }
+      if (sseBuffer.trim()) handleSseEvent(sseBuffer);
     } catch (error) {
       setNotice(error.message);
       setAgentLog((current) => current.map((item, index) => index === current.length - 1

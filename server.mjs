@@ -1761,7 +1761,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       catch (releaseError) { console.warn("Credit release unavailable after thrown provider failure:", releaseError.message); }
     }
     if (res.headersSent) {
-      try { res.write(`data: ${JSON.stringify({ type: "error", error: "The provider could not complete this request. No credit was charged." })}\\n\\n`); } catch {}
+      try { res.write(`data: ${JSON.stringify({ type: "error", error: "The provider could not complete this request. No credit was charged." })}\n\n`); } catch {}
       return res.end();
     }
     res.status(502).json({ error: error.message || "The selected provider could not complete the request." });
