@@ -45,7 +45,7 @@ const gemini = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
 const STRIPE_MODE = String(process.env.STRIPE_MODE || "test").trim().toLowerCase();
-const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
+const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET || "").trim();
 const STRIPE_PRO_PRICE_ID = String(process.env.STRIPE_PRO_PRICE_ID || "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
 const STRIPE_TEST_KEY_READY = STRIPE_MODE === "test" && STRIPE_SECRET_KEY.startsWith("sk_test_");
