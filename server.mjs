@@ -184,6 +184,11 @@ async function releaseDailyCredit(userId, requestId, reason = "provider_failure"
   return d1RequestWithRetry("/v1/credits/release", { method: "POST", headers: { "x-agent-garden-user": String(userId) }, body: JSON.stringify({ userId: String(userId), requestId: String(requestId), reason }) });
 }
 
+async function settleDailyCredit(userId, requestId, finalAmount, reason = "chat_turn_settled") {
+  if (!process.env.D1_WORKER_URL || !userId || String(userId) === "temporary-test-user") return null;
+  return d1RequestWithRetry("/v1/credits/settle", { method: "POST", headers: { "x-agent-garden-user": String(userId) }, body: JSON.stringify({ userId: String(userId), requestId: String(requestId), finalAmount, reason }) });
+}
+
 async function getSubscription(userId) {
   if (!process.env.D1_WORKER_URL || !userId || String(userId) === "temporary-test-user") return { subscription: { plan: "free", status: "inactive" } };
   return d1Request(`/v1/subscriptions/${encodeURIComponent(String(userId))}`, { headers: { "x-agent-garden-user": String(userId) } });
@@ -1818,6 +1823,22 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
     result.sources = [...(result.sources || []), ...(webSearchContext?.sources || [])].filter((source, index, list) => source?.uri && list.findIndex((item) => item.uri === source.uri) === index).slice(0, 10);
     const chatId = String(req.body?.chatId || `chat_${randomBytes(12).toString("hex")}`);
     const chatTitle = conversationTitle(message);
+
+    let actionCount = 0;
+    if (result.execution?.status === "completed" || result.execution?.status === "awaiting_code") actionCount += 1;
+    if (result.provider === "Web Image Retrieval" && result.execution?.artifacts?.length) actionCount += 1;
+    if (webSearchContext?.results?.length) actionCount += 1;
+    const finalAmount = 1 + actionCount * 15;
+
+    if (creditStatus) {
+      try {
+        const settled = await settleDailyCredit(req.user.sub, requestId, finalAmount, actionCount > 0 ? `turn_with_${actionCount}_actions` : "chat_turn");
+        if (settled?.credits) creditStatus = { ...creditStatus, credits: settled.credits };
+      } catch (settleError) {
+        console.warn("Credit settlement unavailable:", settleError.message);
+      }
+    }
+
     const responsePayload = { ...result, agent: agent.id, routingReason, chatId, chatTitle, requestId, credits: creditStatus?.credits || null, webContext: webContext ? { url: webContext.finalUrl, status: webContext.status, title: webContext.title } : null };
 
     try {
