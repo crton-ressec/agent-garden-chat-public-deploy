@@ -1055,15 +1055,15 @@ async function callGemini({ agent, message, history, files, systemContext = "", 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           if (onChunk && !requestConfig.tools) {
-            const result = await gemini.models.generateContentStream({ model, contents, config: requestConfig });
+            const stream = await gemini.models.generateContentStream({ model, contents, config: requestConfig });
             let fullText = "";
-            for await (const chunk of result.stream) {
-              const chunkText = chunk.text();
+            for await (const chunk of stream) {
+              const chunkText = typeof chunk?.text === "function" ? chunk.text() : typeof chunk?.text === "string" ? chunk.text : (((chunk?.candidates || [])[0]?.content?.parts || []).map((part) => part.text || "").join(""));
               fullText += chunkText;
               if (chunkText) emittedAnyChunk = true;
-              onChunk(chunkText);
+              if (chunkText) onChunk(chunkText);
             }
-            return await result.response;
+            return { text: fullText };
           }
           return await gemini.models.generateContent({ model, contents, config: requestConfig });
         } catch (error) {
