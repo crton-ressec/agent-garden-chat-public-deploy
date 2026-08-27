@@ -671,3 +671,13 @@ button:disabled { cursor: not-allowed; opacity: .52; }
     right: 12px;
   }
 }
+
+
+.billing-unconfigured {
+  max-width: 135px;
+  color: #f4c98b;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: right;
+}
