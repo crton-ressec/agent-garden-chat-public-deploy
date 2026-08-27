@@ -1343,7 +1343,7 @@ app.post("/api/billing/checkout", requireUser, enforceActiveAccount, userRateLim
     let customerId = String(existing.customer_id || "");
     if (!customerId) { const customer = await stripe.customers.create({ email: String(req.user.email || ""), name: String(req.user.name || "").slice(0, 160) || undefined, metadata: { agentGardenUserId: String(req.user.sub), email: String(req.user.email || "") } }); customerId = customer.id; }
     const origin = publicAppOrigin(req); const metadata = { agentGardenUserId: String(req.user.sub), email: String(req.user.email || "") };
-    const session = await stripe.checkout.sessions.create({ mode: "subscription", customer: customerId, client_reference_id: String(req.user.sub), line_items: [{ price: STRIPE_PRO_PRICE_ID, quantity: 1 }], success_url: `${origin}/?billing=success&session_id={CHECKOUT_SESSION_ID}`, cancel_url: `${origin}/?billing=cancelled`, metadata, subscription_data: { metadata } });
+    const session = await stripe.checkout.sessions.create({ mode: "subscription", customer: customerId, client_reference_id: String(req.user.sub), line_items: [{ price: STRIPE_PRO_PRICE_ID, quantity: 1 }], success_url: `${origin}/?billing=success&session_id={CHECKOUT_SESSION_ID}`, cancel_url: `${origin}/?billing=cancelled`, metadata, subscription_data: { metadata }, managed_payments: { enabled: false } });
     res.json({ ok: true, url: session.url, sessionId: session.id });
   } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not create the Stripe sandbox checkout session." }); }
 });
