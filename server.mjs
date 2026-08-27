@@ -670,9 +670,10 @@ if (AUTH0_SERVER_READY) {
     authRequired: false,
     auth0Logout: true,
     secret: process.env.AUTH0_SECRET,
-    baseURL: process.env.AUTH0_BASE_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL,
+    baseURL: process.env.AUTH0_BASE_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://agent-garden-chat.onrender.com",
     clientID: process.env.AUTH0_CLIENT_ID,
     issuerBaseURL: AUTH0_ISSUER_BASE_URL,
+    idpLogout: true,
     afterCallback: async (_req, _res, session) => {
       const claims = session.user || {};
       if (claims.sub && claims.email) {
