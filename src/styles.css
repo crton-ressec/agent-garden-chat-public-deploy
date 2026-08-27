@@ -600,3 +600,74 @@ button:disabled { cursor: not-allowed; opacity: .52; }
     right: 12px;
   }
 }
+
+
+.billing-tier-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 16px 16px;
+  padding: 12px;
+  border: 1px solid #38435d;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(100, 120, 190, .18), rgba(50, 64, 95, .18));
+}
+
+.billing-tier-card > div {
+  min-width: 0;
+}
+
+.billing-tier-card strong,
+.billing-tier-card small,
+.billing-tier-label {
+  display: block;
+}
+
+.billing-tier-card strong {
+  margin-top: 2px;
+  color: #f5f7ff;
+  font-size: 13px;
+  letter-spacing: .08em;
+}
+
+.billing-tier-card small,
+.billing-tier-label {
+  color: #9da9bf;
+  font-size: 10.5px;
+}
+
+.billing-tier-label {
+  color: #9bc8ff;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.billing-tier-card button {
+  flex: 0 0 auto;
+  max-width: 150px;
+  white-space: normal;
+  text-align: center;
+}
+
+.billing-upgrade-button {
+  padding: 8px 10px;
+  font-size: 10.5px;
+}
+
+.billing-error {
+  margin: -4px 16px 16px;
+  padding: 9px 10px;
+  border: 1px solid rgba(246, 167, 167, .35);
+  border-radius: 10px;
+  color: #ffb9b9;
+  background: rgba(116, 46, 58, .2);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+@media (max-width: 720px) {
+  .credits-popover {
+    right: 12px;
+  }
+}

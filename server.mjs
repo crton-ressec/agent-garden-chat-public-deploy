@@ -13,6 +13,7 @@ import jwt from "jsonwebtoken";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { auth as auth0Middleware } from "express-openid-connect";
 import { GoogleGenAI } from "@google/genai";
+import Stripe from "stripe";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,6 +44,13 @@ let firebaseCertCache = { expiresAt: 0, certs: {} };
 const gemini = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
+const STRIPE_MODE = String(process.env.STRIPE_MODE || "test").trim().toLowerCase();
+const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
+const STRIPE_PRO_PRICE_ID = String(process.env.STRIPE_PRO_PRICE_ID || "").trim();
+const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
+const STRIPE_TEST_KEY_READY = STRIPE_MODE === "test" && STRIPE_SECRET_KEY.startsWith("sk_test_");
+const STRIPE_SANDBOX_READY = STRIPE_TEST_KEY_READY && Boolean(STRIPE_PRO_PRICE_ID);
+const stripe = STRIPE_TEST_KEY_READY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 const requestWindows = new Map();
 const authRequestWindows = new Map();
@@ -174,6 +182,40 @@ async function reserveDailyCredit(userId, requestId, reason = "chat_turn") {
 async function releaseDailyCredit(userId, requestId, reason = "provider_failure") {
   if (!process.env.D1_WORKER_URL || !userId || String(userId) === "temporary-test-user") return null;
   return d1RequestWithRetry("/v1/credits/release", { method: "POST", headers: { "x-agent-garden-user": String(userId) }, body: JSON.stringify({ userId: String(userId), requestId: String(requestId), reason }) });
+}
+
+async function getSubscription(userId) {
+  if (!process.env.D1_WORKER_URL || !userId || String(userId) === "temporary-test-user") return { subscription: { plan: "free", status: "inactive" } };
+  return d1Request(`/v1/subscriptions/${encodeURIComponent(String(userId))}`, { headers: { "x-agent-garden-user": String(userId) } });
+}
+
+async function syncStripeSubscription(payload) {
+  if (!process.env.D1_WORKER_URL) throw new Error("Subscription storage is not configured on the server.");
+  return d1RequestWithRetry("/v1/subscriptions/sync", { method: "POST", body: JSON.stringify(payload) });
+}
+
+function stripePlanForSubscription(subscription) {
+  const priceId = String(subscription?.items?.data?.[0]?.price?.id || "");
+  return priceId && priceId === STRIPE_PRO_PRICE_ID ? "pro" : "free";
+}
+
+function stripeSubscriptionPayload(subscription, eventId = "", eventType = "subscription.sync") {
+  const customerDetails = typeof subscription?.customer === "object" ? subscription.customer : null;
+  const metadata = subscription?.metadata || {};
+  const status = String(subscription?.status || "inactive");
+  return {
+    eventId,
+    eventType,
+    userId: String(metadata.agentGardenUserId || ""),
+    customerId: String(customerDetails?.id || subscription?.customer || ""),
+    subscriptionId: String(subscription?.id || ""),
+    email: String(metadata.email || customerDetails?.email || ""),
+    status,
+    plan: stripePlanForSubscription(subscription),
+    priceId: String(subscription?.items?.data?.[0]?.price?.id || ""),
+    currentPeriodEnd: subscription?.current_period_end ? new Date(Number(subscription.current_period_end) * 1000).toISOString() : null,
+    cancelAtPeriodEnd: Boolean(subscription?.cancel_at_period_end),
+  };
 }
 
 async function createUserNotification({ userId, type = "info", title, body, actionUrl = null }) {
@@ -616,7 +658,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 app.use(["/__/auth", "/__/firebase"], express.raw({ type: "*/*", limit: "2mb" }), firebaseAuthHelperProxy);
-app.use(express.json({ limit: "14mb" }));
+app.use(express.json({ limit: "14mb", verify: (req, _res, buffer) => { if (req.originalUrl === "/api/billing/stripe/webhook") req.rawBody = Buffer.from(buffer); } }));
 app.use(cookieParser());
 if (AUTH0_SERVER_READY) {
   app.use(auth0Middleware({
@@ -1278,6 +1320,54 @@ app.post("/api/profile/onboarding", requireUser, enforceActiveAccount, async (re
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
 
+function publicAppOrigin(req) {
+  return String(process.env.PUBLIC_APP_ORIGIN || process.env.AUTH0_BASE_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || `https://${req.get("host")}` || "http://localhost:3000").replace(/\/$/, "");
+}
+app.get("/api/billing/status", requireUser, async (req, res) => {
+  try {
+    const [subscriptionData, creditData] = await Promise.all([getSubscription(req.user.sub), getDailyCredits(req.user.sub)]);
+    const subscription = subscriptionData?.subscription || { plan: "free", status: "inactive" };
+    res.json({ configured: STRIPE_SANDBOX_READY, mode: STRIPE_MODE, subscription, plan: subscription.plan || "free", credits: creditData?.credits || null, freeDailyCredits: Number(process.env.FREE_DAILY_CREDITS || 1000), proDailyCredits: Number(process.env.PRO_DAILY_CREDITS || 10000) });
+  } catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not load billing status." }); }
+});
+app.post("/api/billing/checkout", requireUser, enforceActiveAccount, userRateLimit, async (req, res) => {
+  if (!STRIPE_SANDBOX_READY || !stripe) return res.status(503).json({ error: "Stripe sandbox is not configured yet. Add the test secret key and Pro test Price ID to the server." });
+  try {
+    const current = await getSubscription(req.user.sub); const existing = current?.subscription || {};
+    if (["active", "trialing"].includes(String(existing.status || "").toLowerCase()) && String(existing.plan || "free") === "pro") return res.status(409).json({ error: "This account already has an active Pro subscription." });
+    let customerId = String(existing.customer_id || "");
+    if (!customerId) { const customer = await stripe.customers.create({ email: String(req.user.email || ""), name: String(req.user.name || "").slice(0, 160) || undefined, metadata: { agentGardenUserId: String(req.user.sub), email: String(req.user.email || "") } }); customerId = customer.id; }
+    const origin = publicAppOrigin(req); const metadata = { agentGardenUserId: String(req.user.sub), email: String(req.user.email || "") };
+    const session = await stripe.checkout.sessions.create({ mode: "subscription", customer: customerId, client_reference_id: String(req.user.sub), line_items: [{ price: STRIPE_PRO_PRICE_ID, quantity: 1 }], success_url: `${origin}/?billing=success&session_id={CHECKOUT_SESSION_ID}`, cancel_url: `${origin}/?billing=cancelled`, metadata, subscription_data: { metadata } });
+    res.json({ ok: true, url: session.url, sessionId: session.id });
+  } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not create the Stripe sandbox checkout session." }); }
+});
+app.post("/api/billing/portal", requireUser, enforceActiveAccount, userRateLimit, async (req, res) => {
+  if (!STRIPE_TEST_KEY_READY || !stripe) return res.status(503).json({ error: "Stripe sandbox is not configured yet." });
+  try {
+    const current = await getSubscription(req.user.sub); const customerId = String(current?.subscription?.customer_id || "");
+    if (!customerId) return res.status(400).json({ error: "No Stripe customer exists for this account yet. Start the Pro checkout first." });
+    const portal = await stripe.billingPortal.sessions.create({ customer: customerId, return_url: publicAppOrigin(req) });
+    res.json({ ok: true, url: portal.url });
+  } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not open the Stripe customer portal." }); }
+});
+app.post("/api/billing/stripe/webhook", async (req, res) => {
+  if (!STRIPE_TEST_KEY_READY || !stripe || !STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: "Stripe webhook verification is not configured." });
+  const signature = req.get("stripe-signature"); const rawBody = req.rawBody;
+  if (!signature || !rawBody) return res.status(400).json({ error: "Stripe signature or raw request body is missing." });
+  let event;
+  try { event = stripe.webhooks.constructEvent(rawBody, signature, STRIPE_WEBHOOK_SECRET); }
+  catch (error) { return res.status(400).json({ error: `Stripe webhook signature verification failed: ${error.message}` }); }
+  try {
+    const object = event.data?.object || {};
+    let subscription = null; let fallbackMetadata = object.metadata || {};
+    if (event.type === "checkout.session.completed" && object.mode === "subscription" && object.subscription) { subscription = await stripe.subscriptions.retrieve(String(object.subscription)); fallbackMetadata = { ...fallbackMetadata, ...(object.metadata || {}) }; }
+    else if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(event.type)) subscription = object;
+    else if (["invoice.paid", "invoice.payment_failed"].includes(event.type) && object.subscription) subscription = await stripe.subscriptions.retrieve(String(object.subscription));
+    if (subscription) { const payload = stripeSubscriptionPayload(subscription, event.id, event.type); payload.userId = payload.userId || String(fallbackMetadata.agentGardenUserId || object.client_reference_id || ""); payload.email = payload.email || String(fallbackMetadata.email || ""); await syncStripeSubscription(payload); }
+    res.json({ received: true });
+  } catch (error) { console.error("Stripe webhook processing failed:", error.message); res.status(500).json({ error: "Stripe event processing failed and should be retried." }); }
+});
 app.get("/api/credits", requireUser, async (req, res) => {
   try { res.json((await getDailyCredits(req.user.sub)) || { credits: null }); }
   catch (error) { res.status(error.status || 502).json({ error: error.message || "Could not load daily credits." }); }

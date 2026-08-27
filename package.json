@@ -22,7 +22,8 @@
     "firebase": "^12.7.0",
     "helmet": "^8.0.0",
     "jose": "^6.2.9",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "stripe": "^22.6.0"
   },
   "overrides": {
     "uuid": "^11.1.1"

@@ -180,6 +180,9 @@ function App() {
   const [creditsOpen, setCreditsOpen] = useState(false);
   const [creditsLoading, setCreditsLoading] = useState(false);
   const [creditsError, setCreditsError] = useState("");
+  const [billingStatus, setBillingStatus] = useState(null);
+  const [billingBusy, setBillingBusy] = useState(false);
+  const [billingError, setBillingError] = useState("");
   const [notifications, setNotifications] = useState([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -376,6 +379,37 @@ function App() {
       setCreditsLoading(false);
     }
   }, [userId]);
+  const loadBillingStatus = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const response = await fetch(`/api/billing/status?client=${Date.now()}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `Billing service returned HTTP ${response.status}.`);
+      setBillingStatus(data);
+      if (data.credits) setCredits(data.credits);
+      setBillingError("");
+    } catch (error) { setBillingError(error.message || "Billing status is temporarily unavailable."); }
+  }, [userId]);
+  const startProCheckout = useCallback(async () => {
+    setBillingBusy(true); setBillingError("");
+    try {
+      const response = await fetch("/api/billing/checkout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not start the Stripe sandbox checkout.");
+      if (!data.url) throw new Error("Stripe did not return a checkout URL.");
+      window.location.assign(data.url);
+    } catch (error) { setBillingError(error.message || "Could not start checkout."); setBillingBusy(false); }
+  }, []);
+  const openBillingPortal = useCallback(async () => {
+    setBillingBusy(true); setBillingError("");
+    try {
+      const response = await fetch("/api/billing/portal", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not open billing management.");
+      if (!data.url) throw new Error("Stripe did not return a portal URL.");
+      window.location.assign(data.url);
+    } catch (error) { setBillingError(error.message || "Could not open billing management."); setBillingBusy(false); }
+  }, []);
   const loadNotifications = useCallback(async () => {
     if (!userId) return;
     setNotificationsLoading(true);
@@ -392,7 +426,15 @@ function App() {
     const unread = notifications.filter((notification) => !notification.read_at);
     await Promise.all(unread.map((notification) => markNotificationRead(notification)));
   }, [notifications, markNotificationRead]);
-  useEffect(() => { if (userId) { loadCredits(); loadNotifications(); } else { setCredits(null); setCreditsError(""); setCreditsOpen(false); setNotifications([]); setUnreadNotifications(0); } }, [userId, loadCredits, loadNotifications]);
+  useEffect(() => { if (userId) { loadCredits(); loadBillingStatus(); loadNotifications(); } else { setCredits(null); setCreditsError(""); setBillingStatus(null); setBillingError(""); setCreditsOpen(false); setNotifications([]); setUnreadNotifications(0); } }, [userId, loadCredits, loadBillingStatus, loadNotifications]);
+  useEffect(() => {
+    if (!userId) return;
+    const billingResult = new URLSearchParams(window.location.search).get("billing");
+    if (!billingResult) return;
+    window.history.replaceState({}, document.title, window.location.pathname);
+    if (billingResult === "success") { setNotice("Stripe sandbox checkout completed. Waiting for subscription confirmation…"); loadBillingStatus(); }
+    if (billingResult === "cancelled") setNotice("Stripe sandbox checkout was cancelled. No subscription was created.");
+  }, [userId, loadBillingStatus]);
   const suspended = String(profile?.user?.status || user?.status || "active") === "suspended";
   const suspensionReason = profile?.user?.suspension_reason || user?.suspension_reason || profile?.user?.reason || user?.reason || "Your account is temporarily unavailable.";
 
@@ -955,7 +997,7 @@ function App() {
             <button className="topbar-action notification-button" onClick={() => { setNotificationsOpen((open) => !open); loadNotifications(); }} title="Notifications"><Bell size={17} /><span>Notifications</span>{unreadNotifications > 0 && <b>{unreadNotifications > 99 ? "99+" : unreadNotifications}</b>}</button>
             <button className="icon-button"><MoreHorizontal size={20} /></button>
           </div>
-          {creditsOpen && user && <div className="credits-popover"><div className="credits-popover-header"><div><strong>Daily credits</strong><small>Usage allowance for this workspace</small></div><button className="icon-button" onClick={() => setCreditsOpen(false)} aria-label="Close credits"><X size={15} /></button></div>{creditsLoading ? <div className="credits-empty">Refreshing credit balance…</div> : creditsError ? <div className="credits-empty credits-error"><strong>Credit status unavailable</strong><span>{creditsError}</span><button className="secondary-auth-button" onClick={loadCredits}>Retry</button></div> : credits ? <div className="credits-details"><div className="credits-remaining"><strong>{Number(credits.remaining || 0).toLocaleString()}</strong><span>credits remaining</span></div><div className="credits-progress"><span style={{ width: `${Math.min(100, Math.max(0, (Number(credits.remaining || 0) / Math.max(1, Number(credits.creditsGranted || 1000))) * 100))}%` }} /></div><dl><div><dt>Used today</dt><dd>{Number(credits.creditsUsed || 0).toLocaleString()}</dd></div><div><dt>Daily allowance</dt><dd>{Number(credits.creditsGranted || 1000).toLocaleString()}</dd></div><div><dt>Resets</dt><dd>00:00 Toronto time</dd></div></dl><small className="credits-reset-note">{credits.resetsAt || "At midnight America/Toronto"}</small></div> : <div className="credits-empty">No credit information is available yet.</div>}</div>}
+          {creditsOpen && user && <div className="credits-popover"><div className="credits-popover-header"><div><strong>Daily credits</strong><small>Usage allowance for this workspace</small></div><button className="icon-button" onClick={() => setCreditsOpen(false)} aria-label="Close credits"><X size={15} /></button></div>{creditsLoading ? <div className="credits-empty">Refreshing credit balance…</div> : creditsError ? <div className="credits-empty credits-error"><strong>Credit status unavailable</strong><span>{creditsError}</span><button className="secondary-auth-button" onClick={loadCredits}>Retry</button></div> : credits ? <div className="credits-details"><div className="credits-remaining"><strong>{Number(credits.remaining || 0).toLocaleString()}</strong><span>credits remaining</span></div><div className="credits-progress"><span style={{ width: `${Math.min(100, Math.max(0, (Number(credits.remaining || 0) / Math.max(1, Number(credits.creditsGranted || 1000))) * 100))}%` }} /></div><dl><div><dt>Used today</dt><dd>{Number(credits.creditsUsed || 0).toLocaleString()}</dd></div><div><dt>Daily allowance</dt><dd>{Number(credits.creditsGranted || 1000).toLocaleString()}</dd></div><div><dt>Resets</dt><dd>00:00 Toronto time</dd></div></dl><small className="credits-reset-note">{credits.resetsAt || "At midnight America/Toronto"}</small></div> : <div className="credits-empty">No credit information is available yet.</div>}<div className="billing-tier-card"><div><span className="billing-tier-label">Current plan</span><strong>{String(billingStatus?.plan || "free").toUpperCase()}</strong><small>{billingStatus?.plan === "pro" ? `${Number(billingStatus?.proDailyCredits || credits?.creditsGranted || 10000).toLocaleString()} credits/day` : "1,000 credits/day"}</small></div>{billingStatus?.plan === "pro" ? <button className="secondary-auth-button" onClick={openBillingPortal} disabled={billingBusy}>{billingBusy ? "Opening…" : "Manage billing"}</button> : <button className="firebase-button billing-upgrade-button" onClick={startProCheckout} disabled={billingBusy}>{billingBusy ? "Opening checkout…" : "Upgrade to Pro · $5/month"}</button>}</div>{billingError && <div className="billing-error">{billingError}</div>}</div>}
           {notificationsOpen && <div className="notifications-popover"><div className="notifications-popover-header"><div><strong>Notifications</strong><small>{unreadNotifications ? `${unreadNotifications} unread` : "All caught up"}</small></div>{unreadNotifications > 0 && <button onClick={markAllNotificationsRead}>Mark all read</button>}</div>{notificationsLoading ? <div className="notifications-empty">Loading notifications…</div> : notifications.length === 0 ? <div className="notifications-empty">No notifications yet.</div> : <div className="notifications-list">{notifications.slice(0, 30).map((notification) => <button key={notification.id} className={`notification-item ${notification.read_at ? "read" : "unread"}`} onClick={() => markNotificationRead(notification)}><span className="notification-icon"><Bell size={14} /></span><span><strong>{notification.title}</strong><small>{notification.body}</small><time>{new Date(notification.created_at).toLocaleString()}</time></span></button>)}</div>}</div>}
         </header>
 

@@ -47,6 +47,20 @@ services:
         sync: false
       - key: PUBLIC_ORIGIN
         value: https://agent-garden-chat.onrender.com
+      - key: PUBLIC_APP_ORIGIN
+        value: https://agent-garden-chat.onrender.com
+      - key: STRIPE_MODE
+        value: test
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRO_PRICE_ID
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: FREE_DAILY_CREDITS
+        value: "1000"
+      - key: PRO_DAILY_CREDITS
+        value: "10000"
       - key: E2B_ALLOW_INTERNET
         value: "true"
       - key: STORAGE_PROVIDER
