@@ -455,3 +455,148 @@ button:disabled { cursor: not-allowed; opacity: .52; }
     flex-direction: column;
   }
 }
+
+.credits-pill {
+  cursor: pointer;
+  transition: .15s ease;
+}
+
+.credits-pill:hover,
+.credits-pill[aria-expanded="true"] {
+  border-color: #687db6;
+  background: #222d45;
+  color: #f0f4ff;
+}
+
+.credits-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 132px;
+  width: min(330px, calc(100vw - 32px));
+  overflow: hidden;
+  background: #171b24;
+  border: 1px solid #31384a;
+  border-radius: 18px;
+  box-shadow: 0 26px 90px rgba(0, 0, 0, 0.42);
+  z-index: 16;
+}
+
+.credits-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 15px 12px;
+  border-bottom: 1px solid #2a3140;
+}
+
+.credits-popover-header strong,
+.credits-popover-header small {
+  display: block;
+}
+
+.credits-popover-header strong {
+  color: #f0f3fa;
+  font-size: 13px;
+}
+
+.credits-popover-header small {
+  margin-top: 3px;
+  color: #8f99ad;
+  font-size: 10.5px;
+}
+
+.credits-details,
+.credits-empty {
+  padding: 16px;
+}
+
+.credits-remaining {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.credits-remaining strong {
+  color: #f4f7ff;
+  font-size: 30px;
+  letter-spacing: -.05em;
+}
+
+.credits-remaining span {
+  color: #9ba6ba;
+  font-size: 11px;
+}
+
+.credits-progress {
+  height: 7px;
+  margin: 12px 0 14px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #2a3040;
+}
+
+.credits-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #8ee7ff, #aebdff);
+  transition: width .2s ease;
+}
+
+.credits-details dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.credits-details dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.credits-details dt {
+  color: #929caf;
+  font-size: 11px;
+}
+
+.credits-details dd {
+  margin: 0;
+  color: #e8edf7;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.credits-reset-note {
+  display: block;
+  margin-top: 14px;
+  color: #748099;
+  font: 10px/1.5 "DM Mono", monospace;
+}
+
+.credits-empty {
+  color: #98a3b6;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.credits-empty strong,
+.credits-empty span {
+  display: block;
+}
+
+.credits-empty strong {
+  color: #f1d8aa;
+  margin-bottom: 5px;
+}
+
+.credits-empty .secondary-auth-button {
+  margin-top: 12px;
+}
+
+@media (max-width: 740px) {
+  .credits-popover {
+    right: 12px;
+  }
+}

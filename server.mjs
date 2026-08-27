@@ -171,6 +171,11 @@ async function reserveDailyCredit(userId, requestId, reason = "chat_turn") {
   return d1RequestWithRetry("/v1/credits/reserve", { method: "POST", headers: { "x-agent-garden-user": String(userId) }, body: JSON.stringify({ userId: String(userId), requestId: String(requestId), amount: 1, reason }) });
 }
 
+async function releaseDailyCredit(userId, requestId, reason = "provider_failure") {
+  if (!process.env.D1_WORKER_URL || !userId || String(userId) === "temporary-test-user") return null;
+  return d1RequestWithRetry("/v1/credits/release", { method: "POST", headers: { "x-agent-garden-user": String(userId) }, body: JSON.stringify({ userId: String(userId), requestId: String(requestId), reason }) });
+}
+
 async function createUserNotification({ userId, type = "info", title, body, actionUrl = null }) {
   if (!process.env.D1_WORKER_URL || !userId || !title || !body) return null;
   try {
@@ -997,13 +1002,23 @@ async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, 
 
 function isTransientGeminiError(error) {
   const text = String(error?.message || error || "");
-  return /(?:\b503\b|UNAVAILABLE|high demand|temporarily|overloaded|resource exhausted|rate limit|429)/i.test(text);
+  return /(?:\b408\b|\b429\b|\b500\b|\b502\b|\b503\b|UNAVAILABLE|high demand|temporarily|overloaded|resource exhausted|rate limit|quota|deadline exceeded|timed out|ECONNRESET)/i.test(text);
+}
+
+function isUnavailableGeminiModelError(error) {
+  const text = String(error?.message || error || "");
+  return /(?:\b404\b|model[^\n]{0,80}(?:not found|not supported|does not exist)|not found[^\n]{0,80}model)/i.test(text);
+}
+
+function isRetryableGeminiError(error) {
+  return isTransientGeminiError(error) || isUnavailableGeminiModelError(error);
 }
 
 function normalizedGeminiError(error) {
-  if (isTransientGeminiError(error)) {
-    const normalized = new Error("Gemini is temporarily unavailable because the model is experiencing high demand.");
-    normalized.code = "GEMINI_TRANSIENT_UNAVAILABLE";
+  if (isRetryableGeminiError(error)) {
+    const normalized = new Error(isUnavailableGeminiModelError(error) ? "The configured Gemini model was unavailable." : "Gemini is temporarily unavailable because the model is experiencing high demand.");
+    normalized.code = "GEMINI_PROVIDER_UNAVAILABLE";
+    normalized.cause = error;
     return normalized;
   }
   return error;
@@ -1011,7 +1026,7 @@ function normalizedGeminiError(error) {
 
 function availabilityFallbackResult(message) {
   return {
-    answer: "I couldn’t complete that request right now because the available AI providers are temporarily busy. Please try again in a moment, or switch the provider selector and retry.",
+    answer: "The AI providers are temporarily unavailable right now. This attempt did not charge a credit. Please retry in a moment; if Pollinations is selected, switch the provider to Gemini and try again.",
     provider: "Availability fallback",
     sources: [],
     fallbackReason: message,
@@ -1020,7 +1035,8 @@ function availabilityFallbackResult(message) {
 
 async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false, onChunk }) {
   if (!gemini) throw new Error("Gemini is not configured on the server.");
-  const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
+  const configuredModel = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
+  const modelCandidates = [...new Set([configuredModel, "gemini-2.5-flash-lite", "gemini-2.5-flash"])];
   const contents = [
     ...compactHistory(history),
     { role: "user", parts: [{ text: message }, ...fileParts(files)] },
@@ -1034,23 +1050,28 @@ async function callGemini({ agent, message, history, files, systemContext = "", 
   let researchNotice = "";
   const generate = async (requestConfig) => {
     let lastError;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        if (onChunk && !requestConfig.tools) {
-          const result = await gemini.models.generateContentStream({ model, contents, config: requestConfig });
-          let fullText = "";
-          for await (const chunk of result.stream) {
-            const chunkText = chunk.text();
-            fullText += chunkText;
-            onChunk(chunkText);
+    let emittedAnyChunk = false;
+    for (const model of modelCandidates) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          if (onChunk && !requestConfig.tools) {
+            const result = await gemini.models.generateContentStream({ model, contents, config: requestConfig });
+            let fullText = "";
+            for await (const chunk of result.stream) {
+              const chunkText = chunk.text();
+              fullText += chunkText;
+              if (chunkText) emittedAnyChunk = true;
+              onChunk(chunkText);
+            }
+            return await result.response;
           }
-          return await result.response;
+          return await gemini.models.generateContent({ model, contents, config: requestConfig });
+        } catch (error) {
+          lastError = error;
+          if (!isRetryableGeminiError(error)) throw normalizedGeminiError(error);
+          if (onChunk && emittedAnyChunk) throw normalizedGeminiError(error);
+          if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 600));
         }
-        return await gemini.models.generateContent({ model, contents, config: requestConfig });
-      } catch (error) {
-        lastError = error;
-        if (!isTransientGeminiError(error) || attempt === 1) throw normalizedGeminiError(error);
-        await new Promise((resolve) => setTimeout(resolve, 600));
       }
     }
     throw normalizedGeminiError(lastError);
@@ -1651,7 +1672,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
           result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext) });
           result.fallbackReason = "Pollinations’ anonymous queue was full, so this reply was completed by Gemini automatically.";
         } catch (geminiError) {
-          if (geminiError.code !== "GEMINI_TRANSIENT_UNAVAILABLE") throw geminiError;
+          if (!isRetryableGeminiError(geminiError) && geminiError.code !== "GEMINI_PROVIDER_UNAVAILABLE") throw geminiError;
           result = availabilityFallbackResult("Pollinations was full and Gemini was temporarily unavailable.");
         }
       }
@@ -1679,6 +1700,15 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
             } else throw geminiError;
           }
         }
+      }
+    }
+    if (creditStatus && (result.provider === "Availability fallback" || !String(result.answer || "").trim())) {
+      try {
+        const released = await releaseDailyCredit(req.user.sub, requestId, "no_provider_answer");
+        if (released?.credits) creditStatus = { ...(creditStatus || {}), credits: released.credits };
+        result.fallbackReason = `${result.fallbackReason || "Both configured providers were unavailable."} No credit was charged for this attempt.`;
+      } catch (releaseError) {
+        console.warn("Credit release unavailable after provider failure:", releaseError.message);
       }
     }
     result.answer = sanitizeAssistantContent(result.answer, result.execution?.artifacts || []);
@@ -1723,6 +1753,14 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       res.json(responsePayload);
     }
   } catch (error) {
+    if (creditStatus) {
+      try { await releaseDailyCredit(req.user.sub, requestId, "provider_failure"); }
+      catch (releaseError) { console.warn("Credit release unavailable after thrown provider failure:", releaseError.message); }
+    }
+    if (res.headersSent) {
+      try { res.write(`data: ${JSON.stringify({ type: "error", error: "The provider could not complete this request. No credit was charged." })}\\n\\n`); } catch {}
+      return res.end();
+    }
     res.status(502).json({ error: error.message || "The selected provider could not complete the request." });
   }
 });

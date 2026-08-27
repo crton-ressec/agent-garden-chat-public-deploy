@@ -177,6 +177,9 @@ function App() {
   const [adminActionBusy, setAdminActionBusy] = useState(false);
   const [workspaceFiles, setWorkspaceFiles] = useState([]);
   const [credits, setCredits] = useState(null);
+  const [creditsOpen, setCreditsOpen] = useState(false);
+  const [creditsLoading, setCreditsLoading] = useState(false);
+  const [creditsError, setCreditsError] = useState("");
   const [notifications, setNotifications] = useState([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -359,8 +362,19 @@ function App() {
   const userId = user?.sub || null;
   const loadCredits = useCallback(async () => {
     if (!userId) return;
-    try { const response = await fetch(`/api/credits?client=${Date.now()}`, { cache: "no-store" }); const data = await response.json().catch(() => ({})); if (response.ok && data.credits) setCredits(data.credits); }
-    catch { /* credits are supplemental UI; chat enforcement remains server-side */ }
+    setCreditsLoading(true);
+    try {
+      const response = await fetch(`/api/credits?client=${Date.now()}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `Credit service returned HTTP ${response.status}.`);
+      if (!data.credits) throw new Error("Credit information was not returned by the workspace.");
+      setCredits(data.credits);
+      setCreditsError("");
+    } catch (error) {
+      setCreditsError(error.message || "Credit information is temporarily unavailable.");
+    } finally {
+      setCreditsLoading(false);
+    }
   }, [userId]);
   const loadNotifications = useCallback(async () => {
     if (!userId) return;
@@ -378,7 +392,7 @@ function App() {
     const unread = notifications.filter((notification) => !notification.read_at);
     await Promise.all(unread.map((notification) => markNotificationRead(notification)));
   }, [notifications, markNotificationRead]);
-  useEffect(() => { if (userId) { loadCredits(); loadNotifications(); } else { setCredits(null); setNotifications([]); setUnreadNotifications(0); } }, [userId, loadCredits, loadNotifications]);
+  useEffect(() => { if (userId) { loadCredits(); loadNotifications(); } else { setCredits(null); setCreditsError(""); setCreditsOpen(false); setNotifications([]); setUnreadNotifications(0); } }, [userId, loadCredits, loadNotifications]);
   const suspended = String(profile?.user?.status || user?.status || "active") === "suspended";
   const suspensionReason = profile?.user?.suspension_reason || user?.suspension_reason || profile?.user?.reason || user?.reason || "Your account is temporarily unavailable.";
 
@@ -854,6 +868,11 @@ function App() {
               if (data.type === "chunk") {
                 fullContent += data.content;
                 setMessages((current) => current.map((m) => (m.id === assistantMessageId ? { ...m, content: fullContent } : m)));
+              } else if (data.type === "error") {
+                const streamError = data.error || "The provider could not complete this request. No credit was charged.";
+                fullContent = streamError;
+                setNotice(streamError);
+                setMessages((current) => current.map((m) => (m.id === assistantMessageId ? { ...m, content: streamError, provider: "Availability fallback" } : m)));
               } else if (data.type === "done") {
                 const final = data.payload;
                 if (final.chatId) setChatId(final.chatId);
@@ -927,10 +946,11 @@ function App() {
           <button className="mobile-menu icon-button" onClick={() => setRailOpen(!railOpen)}><Menu size={20} /></button>
           <div className="workspace-title"><span>Agent Garden</span><span className="title-divider">/</span><span className="muted-title">{chatTitle}</span>{!config.authRequired && <span className="test-mode-badge">Temporary test mode</span>}</div>
           <div className="topbar-actions">
-            {credits && <div className="credits-pill" title={`Resets at midnight Eastern Time · ${credits.remaining} credits remaining`}><CreditCard size={15} /><span>{credits.remaining.toLocaleString()} credits</span></div>}
+            {user && <button className="credits-pill" onClick={() => { setCreditsOpen((open) => !open); loadCredits(); }} title="View daily credits and reset time" aria-expanded={creditsOpen}><CreditCard size={15} /><span>{credits ? `${Number(credits.remaining || 0).toLocaleString()} credits` : creditsLoading ? "Loading credits" : "Credits"}</span></button>}
             <button className="topbar-action notification-button" onClick={() => { setNotificationsOpen((open) => !open); loadNotifications(); }} title="Notifications"><Bell size={17} /><span>Notifications</span>{unreadNotifications > 0 && <b>{unreadNotifications > 99 ? "99+" : unreadNotifications}</b>}</button>
             <button className="icon-button"><MoreHorizontal size={20} /></button>
           </div>
+          {creditsOpen && user && <div className="credits-popover"><div className="credits-popover-header"><div><strong>Daily credits</strong><small>Usage allowance for this workspace</small></div><button className="icon-button" onClick={() => setCreditsOpen(false)} aria-label="Close credits"><X size={15} /></button></div>{creditsLoading ? <div className="credits-empty">Refreshing credit balance…</div> : creditsError ? <div className="credits-empty credits-error"><strong>Credit status unavailable</strong><span>{creditsError}</span><button className="secondary-auth-button" onClick={loadCredits}>Retry</button></div> : credits ? <div className="credits-details"><div className="credits-remaining"><strong>{Number(credits.remaining || 0).toLocaleString()}</strong><span>credits remaining</span></div><div className="credits-progress"><span style={{ width: `${Math.min(100, Math.max(0, (Number(credits.remaining || 0) / Math.max(1, Number(credits.creditsGranted || 1000))) * 100))}%` }} /></div><dl><div><dt>Used today</dt><dd>{Number(credits.creditsUsed || 0).toLocaleString()}</dd></div><div><dt>Daily allowance</dt><dd>{Number(credits.creditsGranted || 1000).toLocaleString()}</dd></div><div><dt>Resets</dt><dd>00:00 Toronto time</dd></div></dl><small className="credits-reset-note">{credits.resetsAt || "At midnight America/Toronto"}</small></div> : <div className="credits-empty">No credit information is available yet.</div>}</div>}
           {notificationsOpen && <div className="notifications-popover"><div className="notifications-popover-header"><div><strong>Notifications</strong><small>{unreadNotifications ? `${unreadNotifications} unread` : "All caught up"}</small></div>{unreadNotifications > 0 && <button onClick={markAllNotificationsRead}>Mark all read</button>}</div>{notificationsLoading ? <div className="notifications-empty">Loading notifications…</div> : notifications.length === 0 ? <div className="notifications-empty">No notifications yet.</div> : <div className="notifications-list">{notifications.slice(0, 30).map((notification) => <button key={notification.id} className={`notification-item ${notification.read_at ? "read" : "unread"}`} onClick={() => markNotificationRead(notification)}><span className="notification-icon"><Bell size={14} /></span><span><strong>{notification.title}</strong><small>{notification.body}</small><time>{new Date(notification.created_at).toLocaleString()}</time></span></button>)}</div>}</div>}
         </header>
 
