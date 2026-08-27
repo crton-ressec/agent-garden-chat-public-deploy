@@ -1207,8 +1207,8 @@ app.get("/api/config", (req, res) => {
   const publicOrigin = String(process.env.FIREBASE_CLIENT_AUTH_DOMAIN || process.env.PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || `https://${req.get("host") || ""}`).replace(/^https?:\/\//, "").replace(/\/$/, "");
   res.json({
     authRequired: authRequired(),
-    authMode: AUTH0_SPA_READY ? "auth0" : "firebase",
-    auth0Ready: AUTH0_SPA_READY,
+    authMode: (AUTH0_SPA_READY && AUTH0_SERVER_READY) ? "auth0" : "firebase",
+    auth0Ready: AUTH0_SPA_READY && AUTH0_SERVER_READY,
     auth0Domain: AUTH0_ISSUER_BASE_URL.replace(/^https?:\/\//, ""),
     auth0ClientId: AUTH0_CLIENT_ID,
     testUser: authRequired() ? null : TEMP_TEST_USER,
