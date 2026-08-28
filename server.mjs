@@ -48,7 +48,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const GROQ_PRO_MODEL = "openai/gpt-oss-120b";
 const MODEL_MAPPING = {
   "garden-1.5-lite": { provider: "gemini", model: "gemini-3.1-flash-lite", label: "Garden 1.5 lite" },
-  "garden-1.5": { provider: "gemini", model: "gemini-1.5-pro", label: "Garden 1.5" },
+  "garden-1.5": { provider: "gemini", model: "gemini-1.5-flash", label: "Garden 1.5" },
   "garden-rs2": { provider: "groq", model: "openai/gpt-oss-120b", label: "Garden RS2" },
 };
 const STRIPE_MODE = String(process.env.STRIPE_MODE || "test").trim().toLowerCase();
