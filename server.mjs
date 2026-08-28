@@ -988,17 +988,19 @@ function publishExecutionProgress(id, patch) {
   executionProgress.set(id, { ...current, ...patch, updatedAt: Date.now() });
 }
 
-async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, userId, progressId, inputFiles = [] }) {
+async function executeInE2B({ language, code, commands = [], timeoutMs = 20000, userId, progressId, inputFiles = [], plan = "free" }) {
   if (!E2B_READY) throw new Error("E2B execution is not configured on the server yet.");
+  const isPro = String(plan).toLowerCase() === "pro";
+  const maxTimeout = isPro ? 1800000 : 300000; // 30 mins for Pro, 5 mins for Free
   const normalized = String(language || "python").toLowerCase();
   const allowedLanguages = new Set(["python", "python3", "py", "javascript", "js", "node", "bash", "sh"]);
   if (!allowedLanguages.has(normalized)) throw new Error("Supported E2B languages are Python, JavaScript, and Bash.");
   if (!code || String(code).length > 30000) throw new Error("Code must be between 1 and 30,000 characters.");
-  const safeTimeout = Math.min(Math.max(Number(timeoutMs || 20000), 1000), 300000);
+  const safeTimeout = Math.min(Math.max(Number(timeoutMs || 20000), 1000), maxTimeout);
   const startedAt = Date.now();
   let sandbox;
   try {
-    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: 300000, allowInternetAccess: E2B_INTERNET_ENABLED });
+    sandbox = await Sandbox.create({ apiKey: process.env.E2B_API_KEY, timeoutMs: maxTimeout, allowInternetAccess: E2B_INTERNET_ENABLED });
     const mcpBridgeToken = randomBytes(32).toString("hex"); const mcpBridgeUrl = `${process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL || "https://agent-garden-chat.onrender.com"}/api/mcp/bridge`; mcpBridgeTokens.set(mcpBridgeToken, { userId: String(userId), expiresAt: Date.now() + 5 * 60 * 1000 }); const mcpEnvPrefix = `export GARDEN_MCP_BRIDGE_URL='${mcpBridgeUrl}' GARDEN_MCP_EXECUTION_TOKEN='${mcpBridgeToken}'`;
     const extension = normalized.startsWith("python") || normalized === "py" ? "py" : normalized === "bash" || normalized === "sh" ? "sh" : "js";
     const sharePath = executionSharePath(userId);
@@ -1084,10 +1086,13 @@ function availabilityFallbackResult(message) {
   };
 }
 
-async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false, onChunk }) {
+async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false, onChunk, plan = "free" }) {
   if (!gemini) throw new Error("Gemini is not configured on the server.");
-  const configuredModel = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
-  const modelCandidates = [...new Set([configuredModel, "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.7-flash"])];
+  const isPro = String(plan).toLowerCase() === "pro";
+  const configuredModel = process.env.GEMINI_MODEL || (isPro ? "gemini-1.5-pro" : "gemini-3.1-flash-lite");
+  const modelCandidates = isPro 
+    ? [...new Set([configuredModel, "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-3.7-flash"])]
+    : [...new Set([configuredModel, "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.7-flash"])];
   const contents = [
     ...compactHistory(history),
     { role: "user", parts: [{ text: message }, ...fileParts(files)] },
@@ -1684,6 +1689,8 @@ app.get("/api/chats/:chatId", requireUser, enforceActiveAccount, async (req, res
 app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (req, res) => {
   const message = String(req.body?.message || "").trim();
   if (String(req.user.email || "").toLowerCase() !== ADMIN_EMAIL) void reportSafetySignals({ userId: req.user.sub, message });
+  const subscriptionData = await getSubscription(req.user.sub).catch(() => ({ subscription: { plan: "free" } }));
+  const plan = subscriptionData?.subscription?.plan || "free";
   const requestedAgentId = typeof req.body?.agentId === "string" ? req.body.agentId : "auto";
   const requestedProvider = req.body?.provider === "pollinations" ? "pollinations" : "gemini";
   const files = validateIncomingFiles(req.body?.files);
@@ -1746,7 +1753,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       if (!request.code) {
         result = { answer: `## Ready to run\n\nI detected a ${request.language} execution request, but no code was included. Paste the code in a fenced block or write it after a colon, for example:\n\n\`\`\`${request.language}\nprint(2 + 3)\n\`\`\``, provider: "E2B", sources: [], execution: { status: "awaiting_code", language: request.language, code: "", stdout: "", stderr: "", exitCode: null, sandbox: "e2b", artifacts: [] } };
       } else {
-        const execution = await executeInE2B({ ...request, commands: req.body?.commands, userId: req.user.sub, progressId: req.body?.executionId, inputFiles: files });
+        const execution = await executeInE2B({ ...request, commands: req.body?.commands, userId: req.user.sub, progressId: req.body?.executionId, inputFiles: files, plan });
         const output = [execution.stdout && `STDOUT\n${execution.stdout.trim()}`, execution.stderr && `STDERR\n${execution.stderr.trim()}`, `Exit code: ${execution.exitCode}`].filter(Boolean).join("\n\n");
         const generatedResponse = await generateExecutionResponse({ message, execution, agentPrompt: agent.prompt });
         const fence = "```";
@@ -1767,7 +1774,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       } catch (pollinationsError) {
         if (files.length || pollinationsError.code !== "POLLINATIONS_QUEUE_FULL") throw pollinationsError;
         try {
-          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext) });
+          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), plan });
           result.fallbackReason = "Pollinations’ anonymous queue was full, so this reply was completed by Gemini automatically.";
         } catch (geminiError) {
           if (!isRetryableGeminiError(geminiError) && geminiError.code !== "GEMINI_PROVIDER_UNAVAILABLE") throw geminiError;
@@ -1783,7 +1790,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
           res.setHeader("Connection", "keep-alive");
           res.flushHeaders();
         }
-        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk });
+        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan });
       } catch (geminiError) {
         if (agent.search && geminiError.code === "LIVE_SEARCH_UNAVAILABLE") {
           result = { answer: "I couldn’t retrieve live web sources for this request, so I’m not going to present a potentially outdated answer. Please retry or configure a search connector in Workspace Connectors.", provider: "Research unavailable", sources: [], researchNotice: "Live search failed; no stale knowledge-cutoff answer was generated." };
@@ -1828,7 +1835,7 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
     if (result.execution?.status === "completed" || result.execution?.status === "awaiting_code") actionCount += 1;
     if (result.provider === "Web Image Retrieval" && result.execution?.artifacts?.length) actionCount += 1;
     if (webSearchContext?.results?.length) actionCount += 1;
-    const finalAmount = 1 + actionCount * 15;
+    const finalAmount = 10 + actionCount * 50;
 
     if (creditStatus) {
       try {
