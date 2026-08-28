@@ -813,17 +813,29 @@ async function handleAdminCommand({ message, user }) {
   return null;
 }
 
-function userRateLimit(req, res, next) {
-  const now = Date.now();
-  const key = req.user.sub;
-  const windowStart = now - REQUEST_WINDOW_MS;
-  const recent = (requestWindows.get(key) || []).filter((timestamp) => timestamp > windowStart);
-  if (recent.length >= MAX_REQUESTS_PER_WINDOW) {
-    return res.status(429).json({ error: "You have reached the temporary request limit. Please wait a minute and try again." });
+async function userRateLimit(req, res, next) {
+  try {
+    const subscriptionData = await getSubscription(req.user.sub).catch(() => ({ subscription: { plan: "free" } }));
+    const plan = subscriptionData?.subscription?.plan || "free";
+    const isPro = plan === "pro";
+    const limit = isPro ? 50 : MAX_REQUESTS_PER_WINDOW;
+
+    const now = Date.now();
+    const key = req.user.sub;
+    const windowStart = now - REQUEST_WINDOW_MS;
+    const recent = (requestWindows.get(key) || []).filter((timestamp) => timestamp > windowStart);
+    
+    if (recent.length >= limit) {
+      return res.status(429).json({ error: `You have reached the temporary request limit for your ${plan} plan. Please wait a minute and try again.` });
+    }
+    
+    recent.push(now);
+    requestWindows.set(key, recent);
+    next();
+  } catch (error) {
+    console.error("Rate limit check error:", error.message);
+    next();
   }
-  recent.push(now);
-  requestWindows.set(key, recent);
-  next();
 }
 
 function compactHistory(history) {
@@ -1278,8 +1290,8 @@ app.get("/api/config", (req, res) => {
   const publicOrigin = String(process.env.FIREBASE_CLIENT_AUTH_DOMAIN || process.env.PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || `https://${req.get("host") || ""}`).replace(/^https?:\/\//, "").replace(/\/$/, "");
   res.json({
     authRequired: authRequired(),
-    authMode: (AUTH0_SPA_READY && AUTH0_SERVER_READY) ? "auth0" : "firebase",
-    auth0Ready: AUTH0_SPA_READY && AUTH0_SERVER_READY,
+    authMode: (AUTH0_SPA_READY && AUTH0_SERVER_READY) ? "auth0" : (process.env.FIREBASE_API_KEY ? "firebase" : "auth0"),
+    auth0Ready: AUTH0_SPA_READY,
     auth0Domain: AUTH0_ISSUER_BASE_URL.replace(/^https?:\/\//, ""),
     auth0ClientId: AUTH0_CLIENT_ID,
     testUser: authRequired() ? null : TEMP_TEST_USER,
