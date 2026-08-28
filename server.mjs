@@ -44,6 +44,8 @@ let firebaseCertCache = { expiresAt: 0, certs: {} };
 const gemini = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+const GROQ_PRO_MODEL = "openai/gpt-oss-120b";
 const STRIPE_MODE = String(process.env.STRIPE_MODE || "test").trim().toLowerCase();
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET || "").trim();
 const STRIPE_PRO_PRICE_ID = String(process.env.STRIPE_PRO_PRICE_ID || "").trim();
@@ -1150,6 +1152,62 @@ async function callGemini({ agent, message, history, files, systemContext = "", 
   return { answer, provider: "Gemini", sources: citationsFrom(response), researchNotice };
 }
 
+async function callGroq({ agent, message, history, files, systemContext = "", onChunk }) {
+  if (!GROQ_API_KEY) throw new Error("Groq is not configured on the server.");
+  const prior = compactHistory(history).map((entry) => ({
+    role: entry.role === "model" ? "assistant" : "user",
+    content: entry.parts[0].text,
+  }));
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${GROQ_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: GROQ_PRO_MODEL,
+      messages: [
+        { role: "system", content: `${SECURITY_SYSTEM_PROMPT}\n\n${agent.prompt}${systemContext ? `\n\n${systemContext}` : ""}` },
+        ...prior,
+        { role: "user", content: message },
+      ],
+      temperature: agent.id === "coder" ? 0.2 : 0.65,
+      stream: Boolean(onChunk),
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(`Groq returned HTTP ${response.status}: ${error.error?.message || "Unknown error"}`);
+  }
+  if (onChunk) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value);
+      const lines = chunk.split("\n");
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (data === "[DONE]") break;
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices[0].delta?.content || "";
+            fullText += delta;
+            onChunk(delta);
+          } catch {}
+        }
+      }
+    }
+    return { answer: fullText.trim(), provider: "Groq (Pro)", sources: [] };
+  }
+  const result = await response.json();
+  const answer = result.choices[0]?.message?.content?.trim();
+  return { answer, provider: "Groq (Pro)", sources: [] };
+}
+
 async function callPollinations({ agent, message, history, files, systemContext = "", onChunk }) {
   if (Array.isArray(files) && files.length) {
     throw new Error("Pollinations fallback cannot analyze attachments. Please retry when Gemini is available.");
@@ -1790,7 +1848,17 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
           res.setHeader("Connection", "keep-alive");
           res.flushHeaders();
         }
-        result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan });
+        if (plan === "pro" && GROQ_API_KEY) {
+          try {
+            result = await callGroq({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, onChunk });
+          } catch (groqError) {
+            console.warn("Groq Pro model failed, falling back to Gemini:", groqError.message);
+            result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan });
+            result.fallbackReason = "The Pro model was temporarily busy, so this reply was completed by Gemini Pro.";
+          }
+        } else {
+          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan });
+        }
       } catch (geminiError) {
         if (agent.search && geminiError.code === "LIVE_SEARCH_UNAVAILABLE") {
           result = { answer: "I couldn’t retrieve live web sources for this request, so I’m not going to present a potentially outdated answer. Please retry or configure a search connector in Workspace Connectors.", provider: "Research unavailable", sources: [], researchNotice: "Live search failed; no stale knowledge-cutoff answer was generated." };
