@@ -46,6 +46,11 @@ const gemini = process.env.GEMINI_API_KEY
   : null;
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const GROQ_PRO_MODEL = "openai/gpt-oss-120b";
+const MODEL_MAPPING = {
+  "garden-1.5-lite": { provider: "gemini", model: "gemini-3.1-flash-lite", label: "Garden 1.5 lite" },
+  "garden-1.5": { provider: "gemini", model: "gemini-1.5-pro", label: "Garden 1.5" },
+  "garden-rs2": { provider: "groq", model: "openai/gpt-oss-120b", label: "Garden RS2" },
+};
 const STRIPE_MODE = String(process.env.STRIPE_MODE || "test").trim().toLowerCase();
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET || "").trim();
 const STRIPE_PRO_PRICE_ID = String(process.env.STRIPE_PRO_PRICE_ID || "").trim();
@@ -1088,10 +1093,11 @@ function availabilityFallbackResult(message) {
   };
 }
 
-async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false, onChunk, plan = "free" }) {
+async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false, onChunk, plan = "free", modelId }) {
   if (!gemini) throw new Error("Gemini is not configured on the server.");
   const isPro = String(plan).toLowerCase() === "pro";
-  const configuredModel = process.env.GEMINI_MODEL || (isPro ? "gemini-1.5-pro" : "gemini-3.1-flash-lite");
+  const mapping = MODEL_MAPPING[modelId] || MODEL_MAPPING["garden-1.5-lite"];
+  const configuredModel = mapping.model || process.env.GEMINI_MODEL || (isPro ? "gemini-1.5-pro" : "gemini-3.1-flash-lite");
   const modelCandidates = isPro 
     ? [...new Set([configuredModel, "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-3.7-flash"])]
     : [...new Set([configuredModel, "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.7-flash"])];
@@ -1152,8 +1158,9 @@ async function callGemini({ agent, message, history, files, systemContext = "", 
   return { answer, provider: "Gemini", sources: citationsFrom(response), researchNotice };
 }
 
-async function callGroq({ agent, message, history, files, systemContext = "", onChunk }) {
+async function callGroq({ agent, message, history, files, systemContext = "", onChunk, modelId }) {
   if (!GROQ_API_KEY) throw new Error("Groq is not configured on the server.");
+  const mapping = MODEL_MAPPING[modelId] || MODEL_MAPPING["garden-rs2"];
   const prior = compactHistory(history).map((entry) => ({
     role: entry.role === "model" ? "assistant" : "user",
     content: entry.parts[0].text,
@@ -1165,7 +1172,7 @@ async function callGroq({ agent, message, history, files, systemContext = "", on
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: GROQ_PRO_MODEL,
+      model: mapping.model || GROQ_PRO_MODEL,
       messages: [
         { role: "system", content: `${SECURITY_SYSTEM_PROMPT}\n\n${agent.prompt}${systemContext ? `\n\n${systemContext}` : ""}` },
         ...prior,
@@ -1201,11 +1208,11 @@ async function callGroq({ agent, message, history, files, systemContext = "", on
         }
       }
     }
-    return { answer: fullText.trim(), provider: "Groq (Pro)", sources: [] };
+    return { answer: fullText.trim(), provider: "Garden RS2", sources: [] };
   }
   const result = await response.json();
   const answer = result.choices[0]?.message?.content?.trim();
-  return { answer, provider: "Groq (Pro)", sources: [] };
+  return { answer, provider: "Garden RS2", sources: [] };
 }
 
 async function callPollinations({ agent, message, history, files, systemContext = "", onChunk }) {
@@ -1749,6 +1756,9 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
   if (String(req.user.email || "").toLowerCase() !== ADMIN_EMAIL) void reportSafetySignals({ userId: req.user.sub, message });
   const subscriptionData = await getSubscription(req.user.sub).catch(() => ({ subscription: { plan: "free" } }));
   const plan = subscriptionData?.subscription?.plan || "free";
+  const isPro = plan === "pro";
+  const modelId = String(req.body?.modelId || "garden-1.5-lite");
+  if (modelId === "garden-rs2" && !isPro) return res.status(403).json({ error: "Garden RS2 is exclusive to Pro subscribers. Please upgrade to unlock the reasoning model." });
   const requestedAgentId = typeof req.body?.agentId === "string" ? req.body.agentId : "auto";
   const requestedProvider = req.body?.provider === "pollinations" ? "pollinations" : "gemini";
   const files = validateIncomingFiles(req.body?.files);
@@ -1832,8 +1842,8 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
       } catch (pollinationsError) {
         if (files.length || pollinationsError.code !== "POLLINATIONS_QUEUE_FULL") throw pollinationsError;
         try {
-          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), plan });
-          result.fallbackReason = "Pollinations’ anonymous queue was full, so this reply was completed by Gemini automatically.";
+          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), plan, modelId });
+          result.fallbackReason = `Pollinations’ anonymous queue was full, so this reply was completed by ${MODEL_MAPPING[modelId]?.label || "Garden"} automatically.`;
         } catch (geminiError) {
           if (!isRetryableGeminiError(geminiError) && geminiError.code !== "GEMINI_PROVIDER_UNAVAILABLE") throw geminiError;
           result = availabilityFallbackResult("Pollinations was full and Gemini was temporarily unavailable.");
@@ -1848,16 +1858,17 @@ app.post("/api/chat", requireUser, enforceActiveAccount, userRateLimit, async (r
           res.setHeader("Connection", "keep-alive");
           res.flushHeaders();
         }
-        if (plan === "pro" && GROQ_API_KEY) {
+        const mapping = MODEL_MAPPING[modelId] || MODEL_MAPPING["garden-1.5-lite"];
+        if (mapping.provider === "groq" && GROQ_API_KEY) {
           try {
-            result = await callGroq({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, onChunk });
+            result = await callGroq({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, onChunk, modelId });
           } catch (groqError) {
-            console.warn("Groq Pro model failed, falling back to Gemini:", groqError.message);
-            result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan });
-            result.fallbackReason = "The Pro model was temporarily busy, so this reply was completed by Gemini Pro.";
+            console.warn("Groq model failed, falling back to Gemini:", groqError.message);
+            result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan, modelId: "garden-1.5" });
+            result.fallbackReason = `The selected model was temporarily busy, so this reply was completed by ${isPro ? "Garden 1.5" : "Garden 1.5 lite"} automatically.`;
           }
         } else {
-          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan });
+          result = await callGemini({ agent, message: enrichedMessage, history: req.body?.history, files, systemContext, liveSourcesAvailable: Boolean(webSearchContext?.results?.length || webContext), onChunk, plan, modelId });
         }
       } catch (geminiError) {
         if (agent.search && geminiError.code === "LIVE_SEARCH_UNAVAILABLE") {

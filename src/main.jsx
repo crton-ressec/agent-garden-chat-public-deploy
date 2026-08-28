@@ -142,7 +142,7 @@ function App() {
   const [config, setConfig] = useState({ agents: [], firebaseConfig: {}, configured: false, authRequired: true, authMode: "auth0", auth0Ready: true, testUser: null });
   const [user, setUser] = useState(null);
   const [activeAgent, setActiveAgent] = useState("auto");
-  const [provider, setProvider] = useState("gemini");
+  const [modelId, setModelId] = useState("garden-1.5-lite");
   const [input, setInput] = useState("");
   const [files, setFiles] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -869,7 +869,7 @@ function App() {
         body: JSON.stringify({
           message: userMessage.content,
           agentId: activeAgent,
-          provider,
+          modelId,
           files: outboundFiles,
           history: messages.map(({ role, content }) => ({ role, content })),
           chatId,
@@ -894,7 +894,7 @@ function App() {
         id: assistantMessageId,
         role: "assistant",
         content: "",
-        provider: provider,
+        provider: "",
         agent: activeAgent,
         createdAt: formatTime(),
       }]);
@@ -1062,7 +1062,14 @@ function App() {
                   <input ref={fileInputRef} className="hidden-input" type="file" multiple onChange={handleFiles} accept=".txt,.md,.pdf,.doc,.docx,.csv,.json,.xml,.js,.jsx,.mjs,.ts,.tsx,.py,.sh,.html,.css,.svg,.xls,.xlsx,.zip,.tar,.gz,image/*" />
                   <button className="tool-button" onClick={() => fileInputRef.current?.click()} disabled={!user || sending} title="Add files"><Paperclip size={18} /></button>
                   <button className="tool-button" onClick={() => setE2bOpen(true)} disabled={!user || sending} title="Run code in E2B"><Route size={18} /></button>
-                  <div className="provider-select"><span className={`status-dot ${provider}`} /><select value={provider} onChange={(event) => setProvider(event.target.value)} disabled={!user || sending}><option value="gemini">Gemini (automatic fallback)</option><option value="pollinations">Pollinations only</option></select></div>
+                  <div className="provider-select"><span className={`status-dot ${modelId.includes("rs2") ? "groq" : "gemini"}`} /><select value={modelId} onChange={(event) => {
+                    if (event.target.value === "garden-rs2" && billingStatus?.plan !== "pro") {
+                      setNotice("Garden RS2 is exclusive to Pro subscribers. Please upgrade to unlock the reasoning model.");
+                      setCreditsOpen(true);
+                      return;
+                    }
+                    setModelId(event.target.value);
+                  }} disabled={!user || sending}><option value="garden-1.5-lite">Garden 1.5 lite</option><option value="garden-1.5">Garden 1.5</option><option value="garden-rs2">Garden RS2 (Pro only)</option></select></div>
                 </div>
                 <button className={`send-button ${input.trim() || files.length ? "ready" : ""}`} onClick={() => sendMessage()} disabled={!user || sending || (!input.trim() && !files.length)} aria-label="Send message">{sending ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}</button>
               </div>
