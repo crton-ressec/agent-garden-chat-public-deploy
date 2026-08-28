@@ -1675,10 +1675,9 @@ app.get("/api/chats", requireUser, enforceActiveAccount, async (req, res) => {
 
 app.get("/api/chats/:chatId", requireUser, enforceActiveAccount, async (req, res) => {
   try {
-    const chatData = await d1Request(`/v1/chats/${encodeURIComponent(req.params.chatId)}`);
-    if (!chatData?.chat || String(chatData.chat.user_id) !== String(req.user.sub)) return res.status(404).json({ error: "Chat not found." });
-    const messageData = await d1Request(`/v1/messages/${encodeURIComponent(req.params.chatId)}`);
-    res.json({ chat: chatData.chat, messages: Array.isArray(messageData?.messages) ? messageData.messages.map((item) => ({ ...item, content: unseal(item.content) })) : [] });
+    const data = await d1Request(`/v1/chats/${encodeURIComponent(req.params.chatId)}/full`, { headers: { "x-agent-garden-user": String(req.user.sub) } });
+    if (!data?.chat) return res.status(404).json({ error: "Chat not found." });
+    res.json({ chat: data.chat, messages: Array.isArray(data.messages) ? data.messages.map((item) => ({ ...item, content: unseal(item.content) })) : [] });
   } catch (error) { res.status(502).json({ error: error.message || "Could not load the conversation." }); }
 });
 
