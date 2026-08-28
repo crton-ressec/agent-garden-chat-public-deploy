@@ -1086,8 +1086,8 @@ function availabilityFallbackResult(message) {
 
 async function callGemini({ agent, message, history, files, systemContext = "", liveSourcesAvailable = false, onChunk }) {
   if (!gemini) throw new Error("Gemini is not configured on the server.");
-  const configuredModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
-  const modelCandidates = [...new Set([configuredModel, "gemini-1.5-flash", "gemini-1.5-pro"])];
+  const configuredModel = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
+  const modelCandidates = [...new Set([configuredModel, "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.7-flash"])];
   const contents = [
     ...compactHistory(history),
     { role: "user", parts: [{ text: message }, ...fileParts(files)] },
