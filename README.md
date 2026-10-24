@@ -139,3 +139,9 @@ For temporary chat testing only, set the Render environment variable `AUTH_REQUI
 - [Render free instances](https://render.com/docs/free)
 - [Render Blueprint specification](https://render.com/docs/blueprint-spec)
 - [Pollinations API documentation](https://gen.pollinations.ai/docs)
+
+## Launch waitlist and daily gift
+
+The authenticated app can be gated behind the launch waitlist with `WAITLIST_ENABLED=true`. The Render server calls the existing `agent-garden-d1-api` worker for the user status and gift draw. The additive migration and Worker route package are in [`worker/`](worker/). Apply `worker/migrations/0002_waitlist.sql` to the existing D1 database and merge the routes into the existing worker; do not replace the worker because it already owns chats, credits, auth, files, and moderation. The gift is server-enforced once per America/Toronto calendar day. Rank is calculated by points descending, then creation time ascending.
+
+After the migration is live, keep `D1_WORKER_URL` and `D1_WORKER_KEY` in Render only. Set `WAITLIST_ENABLED=false` temporarily if the worker migration has not yet been applied.

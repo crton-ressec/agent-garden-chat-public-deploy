@@ -75,3 +75,7 @@ services:
         sync: false
       - key: TIGRIS_SECRET_ACCESS_KEY
         sync: false
+      - key: WAITLIST_ENABLED
+        value: "true"
+      - key: WAITLIST_ADMIT_PER_DAY
+        value: "10"

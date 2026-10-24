@@ -1,0 +1,12 @@
+name = "agent-garden-waitlist"
+main = "src/index.js"
+compatibility_date = "2026-09-27"
+
+[vars]
+WAITLIST_ADMIT_PER_DAY = "10"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-garden-d1"
+database_id = "REPLACE_WITH_EXISTING_D1_DATABASE_ID"
+migrations_dir = "migrations"
